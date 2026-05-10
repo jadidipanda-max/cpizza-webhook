@@ -35,30 +35,48 @@ module.exports = async function handler(req, res) {
       await handleMessage({ customerPhone: message.from, text: message.text.body })
       return res.status(200).json({ status: 'ok' })
     } catch (err) {
-      console.error(err)
-      return res.status(500).json({ status: 'error' })
+      console.error('Handler error:', err)
+      return res.status(500).json({ status: 'error', message: err.message })
     }
   }
+
+  return res.status(405).json({ status: 'method_not_allowed' })
 }
 
 async function handleMessage({ customerPhone, text }) {
   const villeMatch = text.match(/Quartier:\s*([^\n]+)/)
   const villeDetectee = villeMatch ? villeMatch[1].trim() : null
 
-  let { data: session } = await supabase
+  let { data: session, error: selectError } = await supabase
     .from('sessions')
     .select('*')
     .eq('phone_number', customerPhone)
     .eq('order_status', 'active')
     .maybeSingle()
 
+  if (selectError) {
+    console.error('Supabase select error:', selectError)
+    throw new Error(`Session lookup failed: ${selectError.message}`)
+  }
+
   if (!session) {
-    const { data } = await supabase.from('sessions').insert({
-      phone_number: customerPhone,
-      ville: villeDetectee || 'inconnue',
-      messages: []
-    }).select().single()
-    session = data
+    const { data: newSession, error: insertError } = await supabase
+      .from('sessions')
+      .insert({
+        phone_number: customerPhone,
+        ville: villeDetectee || 'inconnue',
+        messages: [],
+        order_status: 'active',
+      })
+      .select()
+      .single()
+
+    if (insertError) {
+      console.error('Supabase insert error:', insertError)
+      throw new Error(`Session creation failed: ${insertError.message}`)
+    }
+
+    session = newSession
   }
 
   const updatedMessages = [
@@ -67,7 +85,7 @@ async function handleMessage({ customerPhone, text }) {
   ]
 
   const claudeResponse = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-6',
     max_tokens: 1024,
     system: getSystemPrompt(session.ville),
     messages: updatedMessages,
@@ -85,7 +103,7 @@ async function handleMessage({ customerPhone, text }) {
     }
   }
 
-  await supabase.from('sessions').update({
+  const { error: updateError } = await supabase.from('sessions').update({
     messages: [...updatedMessages, { role: 'assistant', content: cleanReply }],
     ...(isConfirmed && {
       order_status: 'confirmed',
@@ -93,6 +111,10 @@ async function handleMessage({ customerPhone, text }) {
       payment_method: orderSummary?.paiement
     })
   }).eq('id', session.id)
+
+  if (updateError) {
+    console.error('Supabase update error:', updateError)
+  }
 
   await sendWhatsAppMessage(customerPhone, cleanReply)
 
@@ -272,7 +294,7 @@ Termine ton message avec exactement ce bloc :
 }
 
 async function sendWhatsAppMessage(to, body) {
-  await fetch(`https://graph.facebook.com/v19.0/${PHONE_ID}/messages`, {
+  const resp = await fetch(`https://graph.facebook.com/v19.0/${PHONE_ID}/messages`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
@@ -285,6 +307,10 @@ async function sendWhatsAppMessage(to, body) {
       text: { body }
     })
   })
+  if (!resp.ok) {
+    const err = await resp.text()
+    console.error('WhatsApp send error:', err)
+  }
 }
 
 function formatAlerteManager(customerPhone, ville, order) {
