@@ -15,6 +15,18 @@ const MANAGER_MAP = {
   'Bonamoussadi': process.env.MANAGER_BONAMOUSSADI,
 }
 
+const BRANCH_CHOICES = { '1': 'Yassa', '2': 'Essos', '3': 'Odza', '4': 'Bonamoussadi' }
+const BRANCH_MENU = `Bonjour ! 👋 Quel point de vente souhaitez-vous utiliser ?\n1️⃣ Yassa — Douala\n2️⃣ Essos — Yaoundé\n3️⃣ Odza — Yaoundé\n4️⃣ Bonamoussadi — Douala`
+const PAYMENT_TIMEOUT_MS = 10 * 60 * 1000
+
+function managerReverse() {
+  const map = {}
+  for (const [branch, phone] of Object.entries(MANAGER_MAP)) {
+    if (phone) map[phone] = branch
+  }
+  return map
+}
+
 module.exports = async function handler(req, res) {
   if (req.method === 'GET') {
     const mode      = req.query['hub.mode']
@@ -28,12 +40,36 @@ module.exports = async function handler(req, res) {
 
   if (req.method === 'POST') {
     try {
+      // Check for expired payment timeouts on every request
+      await checkPaymentTimeouts()
+
       const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]
-      if (!message || message.type !== 'text') {
+      if (!message) {
         return res.status(200).json({ status: 'ignored' })
       }
-      await handleMessage({ customerPhone: message.from, text: message.text.body })
-      return res.status(200).json({ status: 'ok' })
+
+      const senderPhone = message.from
+      const reverse = managerReverse()
+
+      // Route manager text responses
+      if (reverse[senderPhone] && message.type === 'text') {
+        await handleManagerResponse({ managerPhone: senderPhone, branch: reverse[senderPhone], text: message.text.body })
+        return res.status(200).json({ status: 'ok' })
+      }
+
+      // Route customer payment screenshot
+      if (message.type === 'image') {
+        await handlePaymentImage({ customerPhone: senderPhone, mediaId: message.image.id })
+        return res.status(200).json({ status: 'ok' })
+      }
+
+      // Route customer text
+      if (message.type === 'text') {
+        await handleMessage({ customerPhone: senderPhone, text: message.text.body })
+        return res.status(200).json({ status: 'ok' })
+      }
+
+      return res.status(200).json({ status: 'ignored' })
     } catch (err) {
       console.error('Handler error:', err)
       return res.status(500).json({ status: 'error', message: err.message })
@@ -47,24 +83,65 @@ async function handleMessage({ customerPhone, text }) {
   const villeMatch = text.match(/Quartier:\s*([^\n]+)/)
   const villeDetectee = villeMatch ? villeMatch[1].trim() : null
 
-  let { data: session, error: selectError } = await supabase
+  const { data: sessions, error: selectError } = await supabase
     .from('sessions')
     .select('*')
     .eq('phone_number', customerPhone)
-    .eq('order_status', 'active')
-    .maybeSingle()
+    .in('order_status', ['active', 'pending_branch', 'confirmed'])
+    .order('created_at', { ascending: false })
+    .limit(1)
 
   if (selectError) {
     console.error('Supabase select error:', selectError)
     throw new Error(`Session lookup failed: ${selectError.message}`)
   }
 
+  let session = sessions?.[0] || null
+  let isBranchSelection = false
+
+  // Handle pending_branch: customer is choosing a branch
+  if (session?.order_status === 'pending_branch') {
+    const choice = text.trim()
+    const ville = BRANCH_CHOICES[choice]
+    if (ville) {
+      const { error } = await supabase
+        .from('sessions')
+        .update({ ville, order_status: 'active' })
+        .eq('id', session.id)
+      if (error) console.error('Branch update error:', error)
+      session = { ...session, ville, order_status: 'active' }
+      isBranchSelection = true
+      // Fall through to Claude using the stored initial messages
+    } else {
+      await sendWhatsAppMessage(customerPhone,
+        `Veuillez choisir un numéro valide (1, 2, 3 ou 4) :\n\n1️⃣ Yassa — Douala\n2️⃣ Essos — Yaoundé\n3️⃣ Odza — Yaoundé\n4️⃣ Bonamoussadi — Douala`)
+      return
+    }
+  }
+
+  // No session — create one
   if (!session) {
+    if (!villeDetectee) {
+      // No branch info — ask customer to pick a branch first
+      const { error: insertError } = await supabase
+        .from('sessions')
+        .insert({
+          phone_number: customerPhone,
+          ville: null,
+          messages: [{ role: 'user', content: text }],
+          order_status: 'pending_branch',
+        })
+      if (insertError) console.error('Supabase insert error (pending_branch):', insertError)
+      await sendWhatsAppMessage(customerPhone, BRANCH_MENU)
+      return
+    }
+
+    // Quartier: present in message — create active session directly
     const { data: newSession, error: insertError } = await supabase
       .from('sessions')
       .insert({
         phone_number: customerPhone,
-        ville: villeDetectee || 'inconnue',
+        ville: villeDetectee,
         messages: [],
         order_status: 'active',
       })
@@ -75,13 +152,15 @@ async function handleMessage({ customerPhone, text }) {
       console.error('Supabase insert error:', insertError)
       throw new Error(`Session creation failed: ${insertError.message}`)
     }
-
     session = newSession
   }
 
+  if (session.order_status !== 'active') return
+
+  // After branch selection, replay stored initial messages without adding the "1"/"2" choice
   const updatedMessages = [
     ...(session.messages || []),
-    { role: 'user', content: text }
+    ...(isBranchSelection ? [] : [{ role: 'user', content: text }])
   ]
 
   const claudeResponse = await anthropic.messages.create({
@@ -112,9 +191,7 @@ async function handleMessage({ customerPhone, text }) {
     })
   }).eq('id', session.id)
 
-  if (updateError) {
-    console.error('Supabase update error:', updateError)
-  }
+  if (updateError) console.error('Supabase update error:', updateError)
 
   await sendWhatsAppMessage(customerPhone, cleanReply)
 
@@ -124,6 +201,100 @@ async function handleMessage({ customerPhone, text }) {
     if (managerPhone) {
       await sendWhatsAppMessage(managerPhone, formatAlerteManager(customerPhone, ville, orderSummary))
     }
+  }
+}
+
+// Called when a customer sends an image (payment screenshot)
+async function handlePaymentImage({ customerPhone, mediaId }) {
+  const { data: sessions } = await supabase
+    .from('sessions')
+    .select('*')
+    .eq('phone_number', customerPhone)
+    .in('order_status', ['active', 'confirmed'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+
+  const session = sessions?.[0]
+  if (!session) {
+    await sendWhatsAppMessage(customerPhone,
+      "Nous n'avons pas trouvé de commande en cours. Veuillez recommencer votre commande.")
+    return
+  }
+
+  const ville = session.order_summary?.ville || session.ville
+  const managerPhone = MANAGER_MAP[ville]
+  if (!managerPhone) {
+    console.error('No manager phone for ville:', ville)
+    return
+  }
+
+  await supabase.from('sessions').update({
+    order_status: 'payment_pending_manager',
+    payment_pending_since: new Date().toISOString(),
+  }).eq('id', session.id)
+
+  // Forward image to manager
+  await sendWhatsAppImage(managerPhone, mediaId)
+
+  // Send order summary + confirmation request to manager
+  const summaryText = session.order_summary
+    ? formatAlerteManager(customerPhone, ville, session.order_summary)
+    : `📱 Capture de paiement reçue de +${customerPhone}`
+
+  await sendWhatsAppMessage(managerPhone,
+    `${summaryText}\n\nAvez-vous bien reçu ce paiement ? Répondez *OUI* ou *NON*`)
+
+  await sendWhatsAppMessage(customerPhone,
+    "📸 Votre capture d'écran a bien été reçue ! Notre équipe vérifie votre paiement...")
+}
+
+// Called when a manager responds OUI or NON to a payment confirmation
+async function handleManagerResponse({ managerPhone, branch, text }) {
+  const norm = text.trim().toUpperCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+
+  // Find the most recent session awaiting payment confirmation for this branch
+  const { data: sessions } = await supabase
+    .from('sessions')
+    .select('*')
+    .eq('order_status', 'payment_pending_manager')
+    .order('payment_pending_since', { ascending: true })
+
+  const session = sessions?.find(s => (s.order_summary?.ville || s.ville) === branch)
+  if (!session) return
+
+  const customerPhone = session.phone_number
+  const isConfirmed = /\b(OUI|RECU|CONFIRME)\b/.test(norm)
+  const isRejected = /\bNON\b/.test(norm) || norm.includes('PAS RECU')
+
+  if (isConfirmed) {
+    await supabase.from('sessions').update({ order_status: 'payment_confirmed' }).eq('id', session.id)
+    await sendWhatsAppMessage(customerPhone,
+      '✅ Votre paiement a été confirmé ! Votre commande est en cours de préparation. Temps estimé : 30–45 min')
+  } else if (isRejected) {
+    await supabase.from('sessions').update({ order_status: 'payment_failed' }).eq('id', session.id)
+    await sendWhatsAppMessage(customerPhone,
+      "⚠️ Nous n'avons pas encore reçu votre paiement. Veuillez vérifier et renvoyer votre capture d'écran ou contactez l'agence.")
+  }
+}
+
+// Sends the 10-min timeout message to customers whose payment was never confirmed
+async function checkPaymentTimeouts() {
+  const cutoff = new Date(Date.now() - PAYMENT_TIMEOUT_MS).toISOString()
+  const { data: expired } = await supabase
+    .from('sessions')
+    .select('*')
+    .eq('order_status', 'payment_pending_manager')
+    .lt('payment_pending_since', cutoff)
+
+  if (!expired?.length) return
+
+  for (const session of expired) {
+    await supabase.from('sessions')
+      .update({ order_status: 'payment_timeout' })
+      .eq('id', session.id)
+    await sendWhatsAppMessage(session.phone_number,
+      '⏳ Notre équipe vérifie votre paiement. Vous serez notifié sous peu. Merci 🙏')
   }
 }
 
@@ -310,6 +481,26 @@ async function sendWhatsAppMessage(to, body) {
   if (!resp.ok) {
     const err = await resp.text()
     console.error('WhatsApp send error:', err)
+  }
+}
+
+async function sendWhatsAppImage(to, mediaId) {
+  const resp = await fetch(`https://graph.facebook.com/v19.0/${PHONE_ID}/messages`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'image',
+      image: { id: mediaId }
+    })
+  })
+  if (!resp.ok) {
+    const err = await resp.text()
+    console.error('WhatsApp image send error:', err)
   }
 }
 
