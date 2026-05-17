@@ -16,6 +16,7 @@ const MANAGER_MAP = {
 }
 
 const BRANCH_CHOICES = { '1': 'Yassa', '2': 'Essos', '3': 'Odza', '4': 'Bonamoussadi' }
+const VALID_BRANCHES = ['Yassa', 'Essos', 'Odza', 'Bonamoussadi']
 const BRANCH_MENU = `Bonjour ! 👋 Quel point de vente souhaitez-vous utiliser ?\n1️⃣ Yassa — Douala\n2️⃣ Essos — Yaoundé\n3️⃣ Odza — Yaoundé\n4️⃣ Bonamoussadi — Douala`
 const PAYMENT_TIMEOUT_MS = 10 * 60 * 1000
 
@@ -40,7 +41,6 @@ module.exports = async function handler(req, res) {
 
   if (req.method === 'POST') {
     try {
-      // Check for expired payment timeouts on every request
       await checkPaymentTimeouts()
 
       const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]
@@ -83,11 +83,12 @@ async function handleMessage({ customerPhone, text }) {
   const villeMatch = text.match(/Quartier:\s*([^\n]+)/)
   const villeDetectee = villeMatch ? villeMatch[1].trim() : null
 
+  // Find the most recent non-terminal session for this customer
   const { data: sessions, error: selectError } = await supabase
     .from('sessions')
     .select('*')
     .eq('phone_number', customerPhone)
-    .in('order_status', ['active', 'pending_branch', 'confirmed'])
+    .in('order_status', ['active', 'confirmed'])
     .order('created_at', { ascending: false })
     .limit(1)
 
@@ -97,51 +98,69 @@ async function handleMessage({ customerPhone, text }) {
   }
 
   let session = sessions?.[0] || null
-  let isBranchSelection = false
 
-  // Handle pending_branch: customer is choosing a branch
-  if (session?.order_status === 'pending_branch') {
-    const choice = text.trim()
-    const ville = BRANCH_CHOICES[choice]
-    if (ville) {
-      const { error } = await supabase
-        .from('sessions')
-        .update({ ville, order_status: 'active' })
-        .eq('id', session.id)
-      if (error) console.error('Branch update error:', error)
-      session = { ...session, ville, order_status: 'active' }
-      isBranchSelection = true
-      // Fall through to Claude using the stored initial messages
-    } else {
-      await sendWhatsAppMessage(customerPhone,
-        `Veuillez choisir un numéro valide (1, 2, 3 ou 4) :\n\n1️⃣ Yassa — Douala\n2️⃣ Essos — Yaoundé\n3️⃣ Odza — Yaoundé\n4️⃣ Bonamoussadi — Douala`)
+  // Resolve the effective branch: from message (web order), or from a valid existing session
+  const effectiveVille = villeDetectee ||
+    (session && VALID_BRANCHES.includes(session.ville) ? session.ville : null)
+
+  // No valid branch known yet — must ask the customer to pick one
+  if (!effectiveVille) {
+    const selectedVille = BRANCH_CHOICES[text.trim()]
+
+    if (selectedVille) {
+      // Customer just replied with a valid branch number
+      if (session) {
+        // Update existing session (e.g. old session with ville='inconnue' or null)
+        const { error } = await supabase
+          .from('sessions')
+          .update({ ville: selectedVille, order_status: 'active', messages: [] })
+          .eq('id', session.id)
+        if (error) console.error('Branch update error:', error)
+        session = { ...session, ville: selectedVille, order_status: 'active', messages: [] }
+      } else {
+        // Create a fresh session with the selected branch
+        const { data: newSession, error } = await supabase
+          .from('sessions')
+          .insert({
+            phone_number: customerPhone,
+            ville: selectedVille,
+            messages: [],
+            order_status: 'active',
+          })
+          .select()
+          .single()
+        if (error) throw new Error(`Session creation failed: ${error.message}`)
+        session = newSession
+      }
+      // Greet the customer and hand off to Claude
+      const greeting = `Super ! Bienvenue à C Pizza ${selectedVille} 🍕 Comment puis-je vous aider ?`
+      await sendWhatsAppMessage(customerPhone, greeting)
       return
     }
-  }
 
-  // No session — create one
-  if (!session) {
-    if (!villeDetectee) {
-      // No branch info — ask customer to pick a branch first
-      const { error: insertError } = await supabase
+    // Not a valid choice — save the message if this is a first-time customer, then ask for branch
+    if (!session) {
+      const { error } = await supabase
         .from('sessions')
         .insert({
           phone_number: customerPhone,
           ville: null,
           messages: [{ role: 'user', content: text }],
-          order_status: 'pending_branch',
+          order_status: 'active',
         })
-      if (insertError) console.error('Supabase insert error (pending_branch):', insertError)
-      await sendWhatsAppMessage(customerPhone, BRANCH_MENU)
-      return
+      if (error) console.error('Supabase insert error (no-branch):', error)
     }
+    await sendWhatsAppMessage(customerPhone, BRANCH_MENU)
+    return
+  }
 
-    // Quartier: present in message — create active session directly
+  // We have a valid branch — ensure the session exists
+  if (!session) {
     const { data: newSession, error: insertError } = await supabase
       .from('sessions')
       .insert({
         phone_number: customerPhone,
-        ville: villeDetectee,
+        ville: effectiveVille,
         messages: [],
         order_status: 'active',
       })
@@ -157,16 +176,15 @@ async function handleMessage({ customerPhone, text }) {
 
   if (session.order_status !== 'active') return
 
-  // After branch selection, replay stored initial messages without adding the "1"/"2" choice
   const updatedMessages = [
     ...(session.messages || []),
-    ...(isBranchSelection ? [] : [{ role: 'user', content: text }])
+    { role: 'user', content: text }
   ]
 
   const claudeResponse = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
-    system: getSystemPrompt(session.ville),
+    system: getSystemPrompt(effectiveVille),
     messages: updatedMessages,
   })
 
@@ -196,7 +214,7 @@ async function handleMessage({ customerPhone, text }) {
   await sendWhatsAppMessage(customerPhone, cleanReply)
 
   if (isConfirmed && orderSummary) {
-    const ville = orderSummary.ville || session.ville
+    const ville = orderSummary.ville || effectiveVille
     const managerPhone = MANAGER_MAP[ville]
     if (managerPhone) {
       await sendWhatsAppMessage(managerPhone, formatAlerteManager(customerPhone, ville, orderSummary))
@@ -233,10 +251,8 @@ async function handlePaymentImage({ customerPhone, mediaId }) {
     payment_pending_since: new Date().toISOString(),
   }).eq('id', session.id)
 
-  // Forward image to manager
   await sendWhatsAppImage(managerPhone, mediaId)
 
-  // Send order summary + confirmation request to manager
   const summaryText = session.order_summary
     ? formatAlerteManager(customerPhone, ville, session.order_summary)
     : `📱 Capture de paiement reçue de +${customerPhone}`
@@ -253,7 +269,6 @@ async function handleManagerResponse({ managerPhone, branch, text }) {
   const norm = text.trim().toUpperCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
 
-  // Find the most recent session awaiting payment confirmation for this branch
   const { data: sessions } = await supabase
     .from('sessions')
     .select('*')
