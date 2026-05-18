@@ -20,6 +20,17 @@ const VALID_BRANCHES = ['Yassa', 'Essos', 'Odza', 'Bonamoussadi']
 const BRANCH_MENU = `Bonjour ! 👋 Quel point de vente souhaitez-vous utiliser ?\n1️⃣ Yassa — Douala\n2️⃣ Essos — Yaoundé\n3️⃣ Odza — Yaoundé\n4️⃣ Bonamoussadi — Douala`
 const PAYMENT_TIMEOUT_MS = 10 * 60 * 1000
 
+const MENU_URLS = [
+  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.31%20(1).jpeg',
+  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.31%20(2).jpeg',
+  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.32%20(1).jpeg',
+  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.32%20(2).jpeg',
+  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.32%20(3).jpeg',
+  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.32%20(4).jpeg',
+  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.31.jpeg',
+  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.32.jpeg',
+]
+
 function managerReverse() {
   const map = {}
   for (const [branch, phone] of Object.entries(MANAGER_MAP)) {
@@ -83,6 +94,9 @@ async function handleMessage({ customerPhone, text }) {
   const villeMatch = text.match(/Quartier:\s*([^\n]+)/)
   const villeDetectee = villeMatch ? villeMatch[1].trim() : null
 
+  const isMenuRequest = /\b(menu|carte)\b/i.test(text) ||
+    /voir.*menu|show.*menu|envoie.*menu|send.*menu|affiche.*menu/i.test(text)
+
   // Find the most recent non-terminal session for this customer
   const { data: sessions, error: selectError } = await supabase
     .from('sessions')
@@ -102,6 +116,17 @@ async function handleMessage({ customerPhone, text }) {
   // Resolve the effective branch: from message (web order), or from a valid existing session
   const effectiveVille = villeDetectee ||
     (session && VALID_BRANCHES.includes(session.ville) ? session.ville : null)
+
+  // Customer asks for the menu — send all 8 images
+  if (isMenuRequest) {
+    await sendMenuImages(customerPhone)
+    if (effectiveVille) {
+      await sendWhatsAppMessage(customerPhone, "Voici notre menu ! 🍕 Qu'est-ce qui vous fait envie ?")
+    } else {
+      await sendWhatsAppMessage(customerPhone, `Voici notre menu ! 🍕\n\n${BRANCH_MENU}`)
+    }
+    return
+  }
 
   // No valid branch known yet — must ask the customer to pick one
   if (!effectiveVille) {
@@ -477,6 +502,28 @@ Termine ton message avec exactement ce bloc :
   "adresse": "adresse client",
   "paiement": "Orange Money | MTN MoMo | Cash"
 }`
+}
+
+async function sendMenuImages(to) {
+  for (const imageUrl of MENU_URLS) {
+    const resp = await fetch(`https://graph.facebook.com/v19.0/${PHONE_ID}/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'image',
+        image: { link: imageUrl }
+      })
+    })
+    if (!resp.ok) {
+      const err = await resp.text()
+      console.error('Menu image send error:', err)
+    }
+  }
 }
 
 async function sendWhatsAppMessage(to, body) {
