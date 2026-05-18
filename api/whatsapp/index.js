@@ -21,14 +21,14 @@ const BRANCH_MENU = `Bonjour ! 👋 Quel point de vente souhaitez-vous utiliser 
 const PAYMENT_TIMEOUT_MS = 10 * 60 * 1000
 
 const MENU_URLS = [
-  'https://pizza-j-square.vercel.app/menu/menu-1.jpeg',
-  'https://pizza-j-square.vercel.app/menu/menu-2.jpeg',
-  'https://pizza-j-square.vercel.app/menu/menu-3.jpeg',
-  'https://pizza-j-square.vercel.app/menu/menu-4.jpeg',
-  'https://pizza-j-square.vercel.app/menu/menu-5.jpeg',
-  'https://pizza-j-square.vercel.app/menu/menu-6.jpeg',
-  'https://pizza-j-square.vercel.app/menu/menu-7.jpeg',
-  'https://pizza-j-square.vercel.app/menu/menu-8.jpeg',
+  'https://raw.githubusercontent.com/jadidipanda-max/pizza/main/menu/menu-1.jpeg',
+  'https://raw.githubusercontent.com/jadidipanda-max/pizza/main/menu/menu-2.jpeg',
+  'https://raw.githubusercontent.com/jadidipanda-max/pizza/main/menu/menu-3.jpeg',
+  'https://raw.githubusercontent.com/jadidipanda-max/pizza/main/menu/menu-4.jpeg',
+  'https://raw.githubusercontent.com/jadidipanda-max/pizza/main/menu/menu-5.jpeg',
+  'https://raw.githubusercontent.com/jadidipanda-max/pizza/main/menu/menu-6.jpeg',
+  'https://raw.githubusercontent.com/jadidipanda-max/pizza/main/menu/menu-7.jpeg',
+  'https://raw.githubusercontent.com/jadidipanda-max/pizza/main/menu/menu-8.jpeg',
 ]
 
 function managerReverse() {
@@ -53,7 +53,6 @@ module.exports = async function handler(req, res) {
   if (req.method === 'POST') {
     try {
       await checkPaymentTimeouts()
-      await debugTestImageSend()
 
       const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]
       if (!message) {
