@@ -53,6 +53,7 @@ module.exports = async function handler(req, res) {
   if (req.method === 'POST') {
     try {
       await checkPaymentTimeouts()
+      await debugTestImageSend()
 
       const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]
       if (!message) {
@@ -505,7 +506,43 @@ Termine ton message avec exactement ce bloc :
 }
 
 async function sendMenuImages(to) {
-  for (const imageUrl of MENU_URLS) {
+  console.log('[sendMenuImages] START — to:', to, '— images:', MENU_URLS.length)
+  console.log('[sendMenuImages] PHONE_ID:', PHONE_ID)
+  console.log('[sendMenuImages] TOKEN present:', !!process.env.WHATSAPP_TOKEN)
+  for (let i = 0; i < MENU_URLS.length; i++) {
+    const imageUrl = MENU_URLS[i]
+    console.log(`[sendMenuImages] Sending image ${i + 1}/${MENU_URLS.length}: ${imageUrl}`)
+    try {
+      const resp = await fetch(`https://graph.facebook.com/v19.0/${PHONE_ID}/messages`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to,
+          type: 'image',
+          image: { link: imageUrl }
+        })
+      })
+      const respText = await resp.text()
+      console.log(`[sendMenuImages] image ${i + 1} — HTTP ${resp.status}:`, respText)
+    } catch (err) {
+      console.error(`[sendMenuImages] image ${i + 1} fetch threw:`, err.message)
+    }
+  }
+  console.log('[sendMenuImages] DONE')
+}
+
+async function debugTestImageSend() {
+  const TEST_PHONE = '237622276401'
+  const TEST_URL   = 'https://pizza-j-square.vercel.app/menu/menu-1.jpeg'
+  console.log('[debugTest] Sending test image to', TEST_PHONE)
+  console.log('[debugTest] URL:', TEST_URL)
+  console.log('[debugTest] PHONE_ID:', PHONE_ID)
+  console.log('[debugTest] TOKEN present:', !!process.env.WHATSAPP_TOKEN)
+  try {
     const resp = await fetch(`https://graph.facebook.com/v19.0/${PHONE_ID}/messages`, {
       method: 'POST',
       headers: {
@@ -514,15 +551,16 @@ async function sendMenuImages(to) {
       },
       body: JSON.stringify({
         messaging_product: 'whatsapp',
-        to,
+        to: TEST_PHONE,
         type: 'image',
-        image: { link: imageUrl }
+        image: { link: TEST_URL }
       })
     })
-    if (!resp.ok) {
-      const err = await resp.text()
-      console.error('Menu image send error:', err)
-    }
+    const body = await resp.text()
+    console.log('[debugTest] HTTP status:', resp.status)
+    console.log('[debugTest] Meta API response:', body)
+  } catch (err) {
+    console.error('[debugTest] fetch threw:', err.message)
   }
 }
 
