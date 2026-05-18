@@ -21,14 +21,14 @@ const BRANCH_MENU = `Bonjour ! 👋 Quel point de vente souhaitez-vous utiliser 
 const PAYMENT_TIMEOUT_MS = 10 * 60 * 1000
 
 const MENU_URLS = [
-  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.31%20(1).jpeg',
-  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.31%20(2).jpeg',
-  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.32%20(1).jpeg',
-  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.32%20(2).jpeg',
-  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.32%20(3).jpeg',
-  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.32%20(4).jpeg',
-  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.31.jpeg',
-  'https://pizza-j-square.vercel.app/menu/WhatsApp%20Image%202026-05-10%20at%2021.26.32.jpeg',
+  'https://pizza-j-square.vercel.app/menu/menu-1.jpeg',
+  'https://pizza-j-square.vercel.app/menu/menu-2.jpeg',
+  'https://pizza-j-square.vercel.app/menu/menu-3.jpeg',
+  'https://pizza-j-square.vercel.app/menu/menu-4.jpeg',
+  'https://pizza-j-square.vercel.app/menu/menu-5.jpeg',
+  'https://pizza-j-square.vercel.app/menu/menu-6.jpeg',
+  'https://pizza-j-square.vercel.app/menu/menu-7.jpeg',
+  'https://pizza-j-square.vercel.app/menu/menu-8.jpeg',
 ]
 
 function managerReverse() {
