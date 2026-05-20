@@ -17,7 +17,7 @@ const MANAGER_MAP = {
 
 const BRANCH_CHOICES = { '1': 'Yassa', '2': 'Essos', '3': 'Odza', '4': 'Bonamoussadi' }
 const VALID_BRANCHES = ['Yassa', 'Essos', 'Odza', 'Bonamoussadi']
-const BRANCH_MENU = `Bonjour ! 👋 Quel point de vente souhaitez-vous utiliser ?\n1️⃣ Yassa — Douala\n2️⃣ Essos — Yaoundé\n3️⃣ Odza — Yaoundé\n4️⃣ Bonamoussadi — Douala`
+const BRANCH_MENU = `Bonjour ! Quel point de vente souhaitez-vous ?\n1. Yassa — Douala\n2. Essos — Yaoundé\n3. Odza — Yaoundé\n4. Bonamoussadi — Douala`
 const PAYMENT_TIMEOUT_MS = 10 * 60 * 1000
 
 const BRANCH_PAYMENT_INFO = {
@@ -46,6 +46,8 @@ const ACTIVE_STATUSES = [
   'awaiting_delivery_price',
   'awaiting_payment',
   'quality_sent',
+  'branch_change_pending',
+  'awaiting_order_restore',
 ]
 
 // Keywords that trigger a branch reset at any time
@@ -116,12 +118,37 @@ async function handleMessage({ customerPhone, text }) {
 
   // ── 1. CHANGE BRANCH ANYTIME ────────────────────────────────────────────────
   if (CHANGE_BRANCH_EXACT.test(trimmed) || CHANGE_BRANCH_PHRASE.test(trimmed)) {
-    await supabase
+    // Look up current session to save any pending order items
+    const { data: activeSessions } = await supabase
       .from('sessions')
-      .update({ order_status: 'cancelled' })
+      .select('*')
       .eq('phone_number', customerPhone)
       .in('order_status', ACTIVE_STATUSES)
-    await sendWhatsAppMessage(customerPhone, `D'accord ! Recommençons. 🔄\n\n${BRANCH_MENU}`)
+      .order('created_at', { ascending: false })
+      .limit(1)
+
+    const currentSession = activeSessions?.[0]
+
+    if (currentSession?.messages?.length > 0 && currentSession.order_status === 'active') {
+      // Save the in-progress order so we can offer to restore it after branch selection
+      const itemsSummary = await extractOrderSummary(currentSession.messages)
+      await supabase
+        .from('sessions')
+        .update({
+          order_status: 'branch_change_pending',
+          ville: null,
+          order_summary: itemsSummary ? { pending_items_text: itemsSummary } : null,
+        })
+        .eq('id', currentSession.id)
+    } else {
+      await supabase
+        .from('sessions')
+        .update({ order_status: 'cancelled' })
+        .eq('phone_number', customerPhone)
+        .in('order_status', ACTIVE_STATUSES)
+    }
+
+    await sendWhatsAppMessage(customerPhone, `D'accord !\n\n${BRANCH_MENU}`)
     return
   }
 
@@ -152,13 +179,32 @@ async function handleMessage({ customerPhone, text }) {
   if (session?.order_status === 'quality_sent') {
     const n = parseInt(trimmed)
     if (n === 5) {
-      await sendWhatsAppMessage(customerPhone, 'Merci beaucoup ! 🙏⭐⭐⭐ Votre satisfaction est notre priorité !')
+      await sendWhatsAppMessage(customerPhone, 'Merci ! 🙏 Votre satisfaction est notre priorité.')
     } else if (n === 4) {
-      await sendWhatsAppMessage(customerPhone, 'Merci pour votre retour ! 😊 Nous ferons encore mieux la prochaine fois !')
+      await sendWhatsAppMessage(customerPhone, 'Merci ! Nous ferons encore mieux la prochaine fois.')
     } else if (n === 3) {
-      await sendWhatsAppMessage(customerPhone, "Merci pour votre honnêteté. Nous prenons note et allons nous améliorer. N'hésitez pas à nous appeler directement 📞")
+      await sendWhatsAppMessage(customerPhone, "Merci pour votre honnêteté. Nous prenons note et allons améliorer. N'hésitez pas à appeler l'agence directement.")
     } else {
-      await sendWhatsAppMessage(customerPhone, 'Merci pour votre retour ! 🙏 À très bientôt chez C Pizza !')
+      await sendWhatsAppMessage(customerPhone, 'Merci pour votre retour ! À très bientôt chez C Pizza.')
+    }
+    return
+  }
+
+  // ── 3. ORDER RESTORE CHOICE after branch change ────────────────────────────
+  if (session?.order_status === 'awaiting_order_restore') {
+    if (trimmed === '1' && session.messages?.length > 0) {
+      await supabase.from('sessions').update({
+        order_status: 'active',
+        order_summary: null,
+      }).eq('id', session.id)
+      await sendWhatsAppMessage(customerPhone, 'Commande conservée. Voulez-vous ajouter quelque chose ?')
+    } else {
+      await supabase.from('sessions').update({
+        order_status: 'active',
+        messages: [],
+        order_summary: null,
+      }).eq('id', session.id)
+      await sendWhatsAppMessage(customerPhone, "C'est parti ! Comment puis-je vous aider ?")
     }
     return
   }
@@ -171,18 +217,17 @@ async function handleMessage({ customerPhone, text }) {
     await sendMenuImages(customerPhone)
     await sendWhatsAppMessage(customerPhone,
       effectiveVille
-        ? "Voici notre menu ! 🍕 Qu'est-ce qui vous fait envie ?"
-        : `${BRANCH_MENU}`)
+        ? "Voici notre menu. Qu'est-ce qui vous fait envie ?"
+        : BRANCH_MENU)
     return
   }
 
-  // ── 3. DELIVERY OR PICKUP choice ───────────────────────────────────────────
+  // ── 4. DELIVERY OR PICKUP choice ───────────────────────────────────────────
   if (session?.order_status === 'awaiting_delivery_mode') {
     const wantsDelivery = /^1$|livraison|domicile/i.test(trimmed)
     const wantsPickup   = /^2$|emporter|chercher|sur place/i.test(trimmed)
 
     if (wantsDelivery) {
-      // Address may already be stored (from website "Quartier:" field)
       const knownAddress = session.delivery_address
       if (knownAddress) {
         await sendToManagerForDeliveryPrice(customerPhone, session, knownAddress)
@@ -192,7 +237,7 @@ async function handleMessage({ customerPhone, text }) {
           delivery_mode: 'delivery',
         }).eq('id', session.id)
         await sendWhatsAppMessage(customerPhone,
-          '📍 Quelle est votre adresse de livraison ? (Quartier, rue, point de repère...)')
+          'Quelle est votre adresse de livraison ? (quartier, rue, repère...)')
       }
       return
     }
@@ -204,27 +249,27 @@ async function handleMessage({ customerPhone, text }) {
 
     // Unrecognised input — re-ask
     await sendWhatsAppMessage(customerPhone,
-      'Comment souhaitez-vous récupérer votre commande ?\n1️⃣ Livraison à domicile\n2️⃣ À emporter (je viens chercher sur place)')
+      'Comment récupérez-vous votre commande ?\n1. Livraison à domicile\n2. À emporter')
     return
   }
 
-  // ── 4. DELIVERY ADDRESS collection ────────────────────────────────────────
+  // ── 5. DELIVERY ADDRESS collection ────────────────────────────────────────
   if (session?.order_status === 'awaiting_delivery_address') {
     await sendToManagerForDeliveryPrice(customerPhone, session, trimmed)
     return
   }
 
-  // ── 5. Waiting for manager delivery price — tell customer to hold on ───────
+  // ── 6. Waiting for manager delivery price ─────────────────────────────────
   if (session?.order_status === 'awaiting_delivery_price') {
     await sendWhatsAppMessage(customerPhone,
-      '⏳ Votre commande est en cours de traitement. Nous vous revenons très bientôt avec le prix de livraison...')
+      'Votre commande est en cours de traitement. Nous revenons avec le prix de livraison bientôt.')
     return
   }
 
-  // ── 6. Waiting for payment screenshot — remind customer ───────────────────
+  // ── 7. Waiting for payment screenshot ─────────────────────────────────────
   if (session?.order_status === 'awaiting_payment') {
     await sendWhatsAppMessage(customerPhone,
-      "📸 Pour finaliser votre commande, envoyez-nous la capture d'écran de votre paiement mobile, ou payez en cash.")
+      "Envoyez la capture d'écran de votre paiement pour finaliser, ou payez en cash.")
     return
   }
 
@@ -234,12 +279,30 @@ async function handleMessage({ customerPhone, text }) {
 
     if (selectedVille) {
       if (session) {
+        const hasPendingOrder = session.order_status === 'branch_change_pending' && session.messages?.length > 0
+        const pendingItemsText = session.order_summary?.pending_items_text
+
         const { error } = await supabase
           .from('sessions')
-          .update({ ville: selectedVille, order_status: 'active', messages: [] })
+          .update({
+            ville: selectedVille,
+            order_status: hasPendingOrder ? 'awaiting_order_restore' : 'active',
+            messages: hasPendingOrder ? session.messages : [],
+          })
           .eq('id', session.id)
         if (error) console.error('Branch update error:', error)
-        session = { ...session, ville: selectedVille, order_status: 'active', messages: [] }
+        session = { ...session, ville: selectedVille }
+
+        if (hasPendingOrder) {
+          const orderDesc = pendingItemsText
+            ? `Vous aviez commencé une commande : ${pendingItemsText}.`
+            : `Vous aviez une commande en cours.`
+          await sendWhatsAppMessage(customerPhone,
+            `${orderDesc} Voulez-vous la garder ou en passer une nouvelle ?\n1 - Garder ma commande\n2 - Nouvelle commande`)
+        } else {
+          await sendWhatsAppMessage(customerPhone,
+            `Bienvenue à C Pizza ${selectedVille} ! Comment puis-je vous aider ?`)
+        }
       } else {
         const { data: newSession, error } = await supabase
           .from('sessions')
@@ -248,9 +311,9 @@ async function handleMessage({ customerPhone, text }) {
           .single()
         if (error) throw new Error(`Session creation failed: ${error.message}`)
         session = newSession
+        await sendWhatsAppMessage(customerPhone,
+          `Bienvenue à C Pizza ${selectedVille} ! Comment puis-je vous aider ?`)
       }
-      await sendWhatsAppMessage(customerPhone,
-        `Super ! Bienvenue à C Pizza ${selectedVille} 🍕 Comment puis-je vous aider ?`)
       return
     }
 
@@ -309,17 +372,31 @@ async function handleMessage({ customerPhone, text }) {
       order_status:    'awaiting_delivery_mode',
       order_summary:   orderSummary,
       payment_method:  orderSummary?.paiement,
-      // Store address from website "Quartier:" field if present
       delivery_address: villeDetectee || null,
     }),
   }).eq('id', session.id)
 
   if (cleanReply) await sendWhatsAppMessage(customerPhone, cleanReply)
 
-  // After order confirmed by Claude, ask delivery/pickup
   if (isConfirmed) {
     await sendWhatsAppMessage(customerPhone,
-      'Comment souhaitez-vous récupérer votre commande ?\n1️⃣ Livraison à domicile\n2️⃣ À emporter (je viens chercher sur place)')
+      'Comment récupérez-vous votre commande ?\n1. Livraison à domicile\n2. À emporter')
+  }
+}
+
+// Extract a short item summary from conversation history using Claude Haiku
+async function extractOrderSummary(messages) {
+  try {
+    const resp = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 100,
+      system: "Extrais les articles commandés de cette conversation en une liste courte (ex: '1x Regina XL, 2x Coca'). Si aucun article n'a été commandé, retourne une chaîne vide.",
+      messages: messages.slice(-8),
+    })
+    const result = resp.content[0].text.trim()
+    return result || null
+  } catch {
+    return null
   }
 }
 
@@ -349,7 +426,7 @@ async function sendToManagerForDeliveryPrice(customerPhone, session, address) {
   }
 
   await sendWhatsAppMessage(customerPhone,
-    '✅ Commande envoyée à notre équipe ! Nous revenons vers vous avec le prix de livraison dans quelques instants...')
+    'Commande transmise à notre équipe. Nous revenons avec le prix de livraison bientôt.')
 }
 
 // Pickup flow: notify manager and send payment recap immediately
@@ -392,7 +469,7 @@ async function handlePaymentImage({ customerPhone, mediaId }) {
   const session = sessions?.[0]
   if (!session) {
     await sendWhatsAppMessage(customerPhone,
-      "Nous n'avons pas trouvé de commande en cours. Veuillez recommencer votre commande.")
+      'Aucune commande en cours. Veuillez recommencer.')
     return
   }
 
@@ -413,7 +490,7 @@ async function handlePaymentImage({ customerPhone, mediaId }) {
     `💳 Preuve de paiement reçue pour la commande de +${customerPhone}. Confirmez-vous la réception ? Répondez *OUI* ou *NON*`)
 
   await sendWhatsAppMessage(customerPhone,
-    "📸 Votre capture d'écran a bien été reçue ! Notre équipe vérifie votre paiement...")
+    "Capture d'écran reçue. Notre équipe vérifie votre paiement.")
 }
 
 // Called when a manager sends a message
@@ -470,14 +547,14 @@ async function handleManagerResponse({ managerPhone, branch, text }) {
   if (isConfirmed) {
     await supabase.from('sessions').update({ order_status: 'payment_confirmed' }).eq('id', session.id)
     const confirmMsg = isDelivery
-      ? '✅ Commande confirmée ! Vous recevrez un appel du livreur dans les 30 prochaines minutes. Merci de votre confiance ! 🍕'
-      : '✅ Commande confirmée ! Votre commande sera prête dans 20–30 minutes. À tout de suite ! 🍕'
+      ? 'Commande confirmée ! Le livreur vous contactera dans les 30 minutes. 🍕'
+      : 'Commande confirmée ! Prête dans 20–30 minutes. À tout de suite ! 🍕'
     await sendWhatsAppMessage(customerPhone, confirmMsg)
     scheduleQualityFollowUp(customerPhone, session.id)
   } else if (isRejected) {
     await supabase.from('sessions').update({ order_status: 'payment_failed' }).eq('id', session.id)
     await sendWhatsAppMessage(customerPhone,
-      "⚠️ Nous n'avons pas reçu votre paiement. Veuillez vérifier et renvoyer votre capture d'écran ou contactez l'agence directement.")
+      "Paiement non reçu. Vérifiez et renvoyez votre capture d'écran, ou contactez l'agence directement.")
   }
 }
 
@@ -487,15 +564,12 @@ function scheduleQualityFollowUp(customerPhone, sessionId) {
     try {
       await supabase.from('sessions').update({ order_status: 'quality_sent' }).eq('id', sessionId)
       await sendWhatsAppMessage(customerPhone,
-        'Bonjour ! 😊 Votre commande C Pizza a-t-elle bien été livrée ?\n' +
-        'Votre avis nous aide à nous améliorer !\n\n' +
-        '⭐⭐⭐ Excellent service → répondez *5*\n' +
-        '⭐⭐ Bien → répondez *4*\n' +
-        '⭐ À améliorer → répondez *3*\n\n' +
-        'Laissez-nous aussi un avis Google Maps ici 👇\n' +
+        'Votre commande C Pizza s\'était bien passée ? 😊\n' +
+        'Notez-nous :\n5 — Excellent | 4 — Bien | 3 — À améliorer\n\n' +
+        'Laissez aussi un avis Google :\n' +
         '- C Pizza Yassa : https://www.google.com/maps/place/Cpizza+Yassa/@4.0047507,9.8030823,11z/data=!4m12!1m2!2m1!1scpizza!3m8!1s0x106173005fbb98b9:0xcf32a1e9b7b142e!8m2!3d4.0047507!4d9.8030823!9m1!1b1!15sCgZjcGl6emFaCCIGY3BpenphkgEQcGl6emFfcmVzdGF1cmFudJoBJENoZERTVWhOTUc5blMwVkpRMEZuU1VSdWJIRjJTVzlCUlJBQuABAPoBBAgAEEQ!16s%2Fg%2F11wfr52jq2\n' +
-        '- C Pizza Bonamoussadi : https://www.google.com/maps/place/C+Pizza+Bonamoussadi+690455453/@4.0914659,9.4445091,11z/data=!4m10!1m2!2m1!1scpizza!3m6!1s0x10610f0026ae5307:0x67d54a93eab2b68b!8m2!3d4.0914659!4d9.7493797!15sCgZjcGl6emFaCCIGY3BpenphkgEQcGl6emFfcmVzdGF1cmFudJoBRENpOERRVWxSUVVOdlpFTm9kSGxqUmpsdlQyeGFWazlGZHhZYkxJellCQQ!16s%2Fg%2F11wb00djcr\n\n' +
-        "Merci d'avoir choisi C Pizza ! 🍕")
+        '- C Pizza Bonamoussadi : https://www.google.com/maps/place/C+Pizza+Bonamoussadi+690455453/@4.0914659,9.4445091,11z/data=!4m10!1m2!2m1!1scpizza!3m6!1s0x10610f0026ae5307:0x67d54a93eab2b68b!8m2!3d4.0914659!4d9.7493797!15sCgZjcGl6emFaCCIGY3BpenphkgEQcGl6emFfcmVzdGF1cmFudJoBRENpOERRVWxSUVVOdlpFTm9kSGxqUmpsdlQyeGFWazlGZHhZYkxJyllCQQ!16s%2Fg%2F11wb00djcr\n\n' +
+        'Merci d\'avoir choisi C Pizza !')
     } catch (err) {
       console.error('Quality follow-up error:', err)
     }
@@ -518,7 +592,7 @@ async function checkPaymentTimeouts() {
       .update({ order_status: 'payment_timeout' })
       .eq('id', session.id)
     await sendWhatsAppMessage(session.phone_number,
-      '⏳ Notre équipe vérifie votre paiement. Vous serez notifié sous peu. Merci 🙏')
+      'Notre équipe vérifie votre paiement. Vous serez notifié bientôt.')
   }
 }
 
@@ -532,23 +606,29 @@ function formatCustomerPaymentRecap(ville, order, deliveryPrice, mode) {
     .map(a => `• ${a.qty}x ${a.nom} — ${a.prix * a.qty} FCFA`)
     .join('\n')
 
-  let paymentOptions = `1️⃣ Orange Money → ${payment.om || 'Voir numéro agence'}`
-  if (payment.mtn) paymentOptions += `\n2️⃣ MTN Mobile Money → ${payment.mtn}`
-  paymentOptions += `\n3️⃣ Cash ${mode === 'pickup' ? 'sur place' : 'à la livraison'}`
+  let paymentOptions = `1. Orange Money → ${payment.om || 'Voir numéro agence'}`
+  if (payment.mtn) paymentOptions += `\n2. MTN Mobile Money → ${payment.mtn}`
+  paymentOptions += `\n3. Cash ${mode === 'pickup' ? 'sur place' : 'à la livraison'}`
 
   return (
-    `Voici le récapitulatif final de votre commande :\n${items}\n\n` +
-    `💰 Sous-total articles: ${foodTotal} FCFA\n` +
-    (mode === 'delivery' ? `🚚 Frais de livraison: ${deliveryPrice} FCFA\n` : '') +
-    `💵 TOTAL À PAYER: ${grandTotal} FCFA\n\n` +
-    `Pour finaliser, envoyez le paiement à :\n${paymentOptions}\n\n` +
-    `Puis envoyez-nous la capture d'écran de votre paiement.`
+    `Récapitulatif de votre commande :\n${items}\n\n` +
+    `Sous-total articles: ${foodTotal} FCFA\n` +
+    (mode === 'delivery' ? `Frais de livraison: ${deliveryPrice} FCFA\n` : '') +
+    `TOTAL À PAYER: ${grandTotal} FCFA\n\n` +
+    `Envoyez le paiement à :\n${paymentOptions}\n\n` +
+    `Puis envoyez-nous la capture d'écran.`
   )
 }
 
 function getSystemPrompt(ville) {
   return `Tu es l'agent de commande WhatsApp de C Pizza, agence ${ville}.
 Tu es chaleureux, professionnel et tu réponds toujours en français.
+
+## FORMAT DE RÉPONSE
+- Messages courts et directs (3-4 lignes maximum)
+- Une idée par message, pas de longs paragraphes
+- Maximum 1-2 emojis par message — certains messages peuvent n'en avoir aucun
+- Ne jamais mettre des astérisques autour des noms (clients, agences, pizzas). Écris "C Pizza Yassa" et non "*C Pizza Yassa*".
 
 ## INFORMATIONS PAR AGENCE
 
@@ -684,7 +764,7 @@ Plan E — 7 000 FCFA : 04 Plats riz frit viande + 04 Boissons + 01 Pain + 04 Sa
 6. Confirme la commande finale
 
 ## REGLES IMPORTANTES
-- Toujours demander la taille de pizza (M, XL ou XXL) si non precisee
+- Toujours demander la taille de pizza si non precisee. Tailles disponibles UNIQUEMENT : M, XL et XXL. Si le client demande une autre taille (S, L, petite, grande, etc.), réponds : "Nos pizzas sont disponibles en M, XL et XXL uniquement."
 - Les boissons chaudes sont offertes avec toute commande
 - Ne jamais inventer de prix ou d'articles
 - Repondre en francais (ou anglais si le client ecrit en anglais)
