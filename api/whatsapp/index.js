@@ -1,30 +1,37 @@
+'use strict'
 const Anthropic = require('@anthropic-ai/sdk')
 const { createClient } = require('@supabase/supabase-js')
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-const supabase = createClient(
+const supabase  = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 )
 
 const PHONE_ID = process.env.PHONE_ID_AGENT
+
 const MANAGER_MAP = {
-  'Yassa':        process.env.MANAGER_YASSA,
-  'Essos':        process.env.MANAGER_ESSOS,
-  'Odza':         process.env.MANAGER_ODZA,
-  'Bonamoussadi': process.env.MANAGER_BONAMOUSSADI,
+  Yassa:        process.env.MANAGER_YASSA,
+  Essos:        process.env.MANAGER_ESSOS,
+  Odza:         process.env.MANAGER_ODZA,
+  Bonamoussadi: process.env.MANAGER_BONAMOUSSADI,
 }
 
 const BRANCH_CHOICES = { '1': 'Yassa', '2': 'Essos', '3': 'Odza', '4': 'Bonamoussadi' }
-const VALID_BRANCHES = ['Yassa', 'Essos', 'Odza', 'Bonamoussadi']
-const BRANCH_MENU = `Bonjour ! Quel point de vente souhaitez-vous ?\n1. Yassa — Douala\n2. Essos — Yaoundé\n3. Odza — Yaoundé\n4. Bonamoussadi — Douala`
-const PAYMENT_TIMEOUT_MS = 10 * 60 * 1000
+const VALID_BRANCHES  = Object.values(BRANCH_CHOICES)
 
 const BRANCH_PAYMENT_INFO = {
-  'Yassa':        { om: 'Code 768309 — CPizza Akwa 2',                  mtn: 'Code 737017 — CPizza SARL 2' },
-  'Essos':        { om: 'Code 24 96 89 — CPizza Essos',                 mtn: null },
-  'Odza':         { om: '696 297 418 — Code 827367 — Massop Pengou',    mtn: '680 362 222 — Arlette Massop Pengou' },
-  'Bonamoussadi': { om: '695 58 96 02 — Code 21 56 84 — CPizza Makepe', mtn: '672 92 61 59' },
+  Yassa:        { om: 'Code 768309 — CPizza Akwa 2',                  mtn: 'Code 737017 — CPizza SARL 2' },
+  Essos:        { om: 'Code 24 96 89 — CPizza Essos',                 mtn: null },
+  Odza:         { om: '696 297 418 — Code 827367 — Massop Pengou',    mtn: '680 362 222 — Arlette Massop Pengou' },
+  Bonamoussadi: { om: '695 58 96 02 — Code 21 56 84 — CPizza Makepe', mtn: '672 92 61 59' },
+}
+
+const BRANCH_MAPS = {
+  Yassa:        'https://www.google.com/maps/place/Cpizza+Yassa/@4.0047507,9.8030823,11z/data=!4m12!1m2!2m1!1scpizza!3m8!1s0x106173005fbb98b9:0xcf32a1e9b7b142e!8m2!3d4.0047507!4d9.8030823!9m1!1b1!15sCgZjcGl6emFaCCIGY3BpenphkgEQcGl6emFfcmVzdGF1cmFudJoBJENoZURTVWhOTUc5blMwVkpRMEZuU1VSdWJIRjJTVzlCUlJBQuABAPoBBAgAEEQ!16s%2Fg%2F11wfr52jq2',
+  Bonamoussadi: 'https://www.google.com/maps/place/C+Pizza+Bonamoussadi+690455453/@4.0914659,9.4445091,11z/data=!4m10!1m2!2m1!1scpizza!3m6!1s0x10610f0026ae5307:0x67d54a93eab2b68b!8m2!3d4.0914659!4d9.7493797!15sCgZjcGl6emFaCCIGY3BpenphkgEQcGl6emFfcmVzdGF1cmFudJoBRENpOERRVWxSUVVOdlpFTm9kSGxqUmpsdlQyeGFWazlGZHhZYkxJyllCQQ!16s%2Fg%2F11wb00djcr',
+  Essos:        'https://maps.google.com/?q=CPizza+Essos+Yaounde',
+  Odza:         'https://maps.google.com/?q=CPizza+Odza+Yaounde',
 }
 
 const MENU_URLS = [
@@ -38,829 +45,819 @@ const MENU_URLS = [
   'https://raw.githubusercontent.com/jadidipanda-max/pizza/main/menu/menu-8.jpeg',
 ]
 
-// All statuses where the customer can still interact
-const ACTIVE_STATUSES = [
-  'active',
-  'awaiting_delivery_mode',
-  'awaiting_delivery_address',
-  'awaiting_delivery_price',
-  'awaiting_payment',
-  'quality_sent',
-  'branch_change_pending',
-  'awaiting_order_restore',
-]
+// ─── State machine states ────────────────────────────────────────────────────
 
-// Keywords that trigger a branch reset at any time
-const CHANGE_BRANCH_EXACT  = /^(changer|recommencer)$/i
-const CHANGE_BRANCH_PHRASE = /\b(autre agence|changer agence|changer de agence)\b/i
-
-function managerReverse() {
-  const map = {}
-  for (const [branch, phone] of Object.entries(MANAGER_MAP)) {
-    if (phone) map[phone] = branch
-  }
-  return map
+const STATE = {
+  CHOOSING_BRANCH:              'CHOOSING_BRANCH',
+  BROWSING:                     'BROWSING',
+  RESTORING_ORDER:              'RESTORING_ORDER',
+  CHOOSING_DELIVERY_MODE:       'CHOOSING_DELIVERY_MODE',
+  WAITING_ADDRESS:              'WAITING_ADDRESS',
+  WAITING_DELIVERY_PRICE:       'WAITING_DELIVERY_PRICE',
+  WAITING_PAYMENT:              'WAITING_PAYMENT',
+  WAITING_MANAGER_CONFIRMATION: 'WAITING_MANAGER_CONFIRMATION',
+  CONFIRMED:                    'CONFIRMED',
+  QUALITY_FOLLOWUP:             'QUALITY_FOLLOWUP',
+  BRANCH_CHANGE_PENDING:        'BRANCH_CHANGE_PENDING',
 }
+
+// Terminal states that should not receive further messages
+const TERMINAL_STATES = new Set([STATE.CONFIRMED, STATE.QUALITY_FOLLOWUP])
+
+// States where the customer is actively waiting — no outside-hours block
+const PENDING_ORDER_STATES = new Set([
+  STATE.WAITING_PAYMENT,
+  STATE.WAITING_MANAGER_CONFIRMATION,
+  STATE.WAITING_DELIVERY_PRICE,
+])
+
+// ─── Hardcoded messages (Claude never generates these) ───────────────────────
+
+const MSG = {
+  CHOOSE_BRANCH: `Bonjour ! Choisissez votre point de vente :
+1. Yassa (Douala)
+2. Essos (Yaoundé)
+3. Odza (Yaoundé)
+4. Bonamoussadi (Douala)`,
+
+  CHOOSE_DELIVERY_MODE: `Comment souhaitez-vous récupérer votre commande ?
+1. Livraison
+2. À emporter`,
+
+  WAITING_ADDRESS: `Quelle est votre adresse de livraison ?`,
+
+  OUTSIDE_HOURS: `Nous sommes fermés (ouverture 12h). Votre commande sera traitée à l'ouverture.`,
+
+  CONFIRMED_DELIVERY: `Commande confirmée. Le livreur vous appellera dans 30 minutes.`,
+
+  CONFIRMED_PICKUP: `Commande confirmée. Votre commande sera prête dans 20-30 minutes.`,
+
+  PAYMENT_RECEIVED: `Capture d'écran reçue. Notre équipe vérifie votre paiement.`,
+
+  PAYMENT_REJECTED: `Paiement non reçu. Vérifiez et renvoyez votre capture d'écran.`,
+}
+
+// ─── Detection regexes ───────────────────────────────────────────────────────
+
+const RE_CHANGE_BRANCH  = /\b(changer|recommencer|autre agence|changer agence|changer de agence)\b/i
+const RE_MENU_REQUEST   = /\b(menu|carte)\b/i
+const RE_STATUS         = /^statut$/i
+const RE_ORDER_KEYWORDS = /\b(commander|commande|je veux|je voudrais|je prends|j'aimerais|j'ai besoin|prendre|ajouter|livrer)\b|\b\d+\s*x?\s*(pizza|poulet|burger|chawarma|sandwich|salade|boisson|coca|fanta|malta|jus)\b/i
+
+// ─── Main HTTP handler ───────────────────────────────────────────────────────
 
 module.exports = async function handler(req, res) {
   if (req.method === 'GET') {
-    const mode      = req.query['hub.mode']
-    const token     = req.query['hub.verify_token']
-    const challenge = req.query['hub.challenge']
+    const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query
     if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
       return res.status(200).send(challenge)
     }
     return res.status(403).send('Forbidden')
   }
 
-  if (req.method === 'POST') {
-    try {
-      await checkPaymentTimeouts()
+  if (req.method !== 'POST') return res.status(405).json({ status: 'method_not_allowed' })
 
-      const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]
-      if (!message) {
-        return res.status(200).json({ status: 'ignored' })
-      }
+  try {
+    await checkPaymentTimeouts()
 
-      const senderPhone = message.from
-      const reverse = managerReverse()
+    const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]
+    if (!message) return res.status(200).json({ status: 'ignored' })
 
-      // Route manager text responses
-      if (reverse[senderPhone] && message.type === 'text') {
-        await handleManagerResponse({ managerPhone: senderPhone, branch: reverse[senderPhone], text: message.text.body })
-        return res.status(200).json({ status: 'ok' })
-      }
+    const senderPhone  = message.from
+    const managerBranch = getManagerBranch(senderPhone)
 
-      // Route customer payment screenshot
-      if (message.type === 'image') {
-        await handlePaymentImage({ customerPhone: senderPhone, mediaId: message.image.id })
-        return res.status(200).json({ status: 'ok' })
-      }
-
-      // Route customer text
-      if (message.type === 'text') {
-        await handleMessage({ customerPhone: senderPhone, text: message.text.body })
-        return res.status(200).json({ status: 'ok' })
-      }
-
-      return res.status(200).json({ status: 'ignored' })
-    } catch (err) {
-      console.error('Handler error:', err)
-      return res.status(500).json({ status: 'error', message: err.message })
+    if (managerBranch && message.type === 'text') {
+      await handleManagerMessage(senderPhone, managerBranch, message.text.body)
+      return res.status(200).json({ status: 'ok' })
     }
-  }
 
-  return res.status(405).json({ status: 'method_not_allowed' })
+    if (message.type === 'image') {
+      await handlePaymentImage(senderPhone, message.image.id)
+      return res.status(200).json({ status: 'ok' })
+    }
+
+    if (message.type === 'text') {
+      await handleCustomerMessage(senderPhone, message.text.body)
+      return res.status(200).json({ status: 'ok' })
+    }
+
+    return res.status(200).json({ status: 'ignored' })
+  } catch (err) {
+    console.error('Handler error:', err)
+    return res.status(500).json({ status: 'error', message: err.message })
+  }
 }
 
-async function handleMessage({ customerPhone, text }) {
+// ─── Customer message dispatcher ─────────────────────────────────────────────
+
+async function handleCustomerMessage(phone, text) {
   const trimmed = text.trim()
 
-  // ── 1. CHANGE BRANCH ANYTIME ────────────────────────────────────────────────
-  if (CHANGE_BRANCH_EXACT.test(trimmed) || CHANGE_BRANCH_PHRASE.test(trimmed)) {
-    // Look up current session to save any pending order items
-    const { data: activeSessions } = await supabase
-      .from('sessions')
-      .select('*')
-      .eq('phone_number', customerPhone)
-      .in('order_status', ACTIVE_STATUSES)
-      .order('created_at', { ascending: false })
-      .limit(1)
-
-    const currentSession = activeSessions?.[0]
-
-    if (currentSession?.messages?.length > 0 && currentSession.order_status === 'active') {
-      // Save the in-progress order so we can offer to restore it after branch selection
-      const itemsSummary = await extractOrderSummary(currentSession.messages)
-      await supabase
-        .from('sessions')
-        .update({
-          order_status: 'branch_change_pending',
-          ville: null,
-          order_summary: itemsSummary ? { pending_items_text: itemsSummary } : null,
-        })
-        .eq('id', currentSession.id)
-    } else {
-      await supabase
-        .from('sessions')
-        .update({ order_status: 'cancelled' })
-        .eq('phone_number', customerPhone)
-        .in('order_status', ACTIVE_STATUSES)
-    }
-
-    await sendWhatsAppMessage(customerPhone, `D'accord !\n\n${BRANCH_MENU}`)
+  // "statut" → describe current state, always respond
+  if (RE_STATUS.test(trimmed)) {
+    const session = await getActiveSession(phone)
+    await sendWhatsAppMessage(phone, describeState(session))
     return
   }
 
-  // Extract branch/address from website "Quartier:" field
-  const villeMatch    = text.match(/Quartier:\s*([^\n]+)/)
-  const villeDetectee = villeMatch ? villeMatch[1].trim() : null
+  const session = await getActiveSession(phone)
 
-  const isMenuRequest = /\b(menu|carte)\b/i.test(text) ||
-    /voir.*menu|show.*menu|envoie.*menu|send.*menu|affiche.*menu/i.test(text)
+  // Outside business hours (12h–22h WAT = UTC+1)
+  if (isOutsideHours()) {
+    if (!session || !PENDING_ORDER_STATES.has(session.state)) {
+      await sendWhatsAppMessage(phone, MSG.OUTSIDE_HOURS)
+      if (!session) await createSession(phone, null)
+      return
+    }
+  }
 
-  // Find the most recent active session for this customer
-  const { data: sessions, error: selectError } = await supabase
+  // "changer / recommencer / autre agence" → reset branch at any time
+  if (RE_CHANGE_BRANCH.test(trimmed)) {
+    await handleBranchChange(phone, session)
+    return
+  }
+
+  // Ensure session exists
+  const s = session || await createSession(phone, null)
+
+  // Detect and persist language on first message
+  if (!s.language) {
+    const lang = detectLanguage(text)
+    await updateSession(s.id, { language: lang })
+    s.language = lang
+  }
+
+  const state = s.state || STATE.CHOOSING_BRANCH
+
+  switch (state) {
+    case STATE.CHOOSING_BRANCH:
+    case STATE.BRANCH_CHANGE_PENDING:
+      return handleChoosingBranch(phone, s, trimmed)
+
+    case STATE.RESTORING_ORDER:
+      return handleRestoringOrder(phone, s, trimmed)
+
+    case STATE.BROWSING:
+      return handleBrowsing(phone, s, text, trimmed)
+
+    case STATE.CHOOSING_DELIVERY_MODE:
+      return handleChoosingDeliveryMode(phone, s, trimmed)
+
+    case STATE.WAITING_ADDRESS:
+      return handleWaitingAddress(phone, s, trimmed)
+
+    case STATE.WAITING_DELIVERY_PRICE:
+      await sendWhatsAppMessage(phone, 'Votre commande est en cours de traitement. Nous revenons avec le prix de livraison bientôt.')
+      return
+
+    case STATE.WAITING_PAYMENT:
+      await sendWhatsAppMessage(phone, "Envoyez la capture d'écran de votre paiement pour finaliser.")
+      return
+
+    case STATE.WAITING_MANAGER_CONFIRMATION:
+      await sendWhatsAppMessage(phone, 'Votre paiement est en cours de vérification. Vous serez notifié bientôt.')
+      return
+
+    case STATE.QUALITY_FOLLOWUP:
+      return handleQualityResponse(phone, s, trimmed)
+
+    default:
+      await updateSession(s.id, { state: STATE.CHOOSING_BRANCH })
+      await sendWhatsAppMessage(phone, MSG.CHOOSE_BRANCH)
+  }
+}
+
+// ─── State handlers ───────────────────────────────────────────────────────────
+
+async function handleChoosingBranch(phone, session, trimmed) {
+  let branch = BRANCH_CHOICES[trimmed]
+  if (!branch) {
+    branch = VALID_BRANCHES.find(b => trimmed.toLowerCase().includes(b.toLowerCase()))
+  }
+
+  if (!branch) {
+    await sendWhatsAppMessage(phone, MSG.CHOOSE_BRANCH)
+    return
+  }
+
+  const hasPendingItems = session.state === STATE.BRANCH_CHANGE_PENDING &&
+    session.order_summary?.pending_items?.length > 0
+
+  await updateSession(session.id, {
+    state:    hasPendingItems ? STATE.RESTORING_ORDER : STATE.BROWSING,
+    ville:    branch,
+    messages: hasPendingItems ? (session.messages || []) : [],
+  })
+
+  if (hasPendingItems) {
+    const itemsText = formatItemsList(session.order_summary.pending_items)
+    await sendWhatsAppMessage(phone,
+      `Vous aviez commandé :\n${itemsText}\nGarder cette commande ?\n1. Oui  2. Non`)
+  } else {
+    await sendWhatsAppMessage(phone, `Bienvenue à C Pizza ${branch} ! Comment puis-je vous aider ?`)
+  }
+}
+
+async function handleRestoringOrder(phone, session, trimmed) {
+  if (/^(1|oui|yes|ok)$/i.test(trimmed)) {
+    await updateSession(session.id, {
+      state:         STATE.BROWSING,
+      order_summary: { ...session.order_summary, pending_items: null },
+    })
+    await sendWhatsAppMessage(phone, 'Commande conservée. Voulez-vous ajouter quelque chose ?')
+  } else {
+    await updateSession(session.id, {
+      state:         STATE.BROWSING,
+      messages:      [],
+      order_summary: null,
+    })
+    await sendWhatsAppMessage(phone, "C'est parti ! Comment puis-je vous aider ?")
+  }
+}
+
+async function handleBrowsing(phone, session, text, trimmed) {
+  // Menu request → send images, no Claude
+  if (RE_MENU_REQUEST.test(text)) {
+    await sendMenuImages(phone)
+    await sendWhatsAppMessage(phone, "Voici notre menu. Qu'est-ce qui vous fait envie ?")
+    return
+  }
+
+  const updatedMessages = [...(session.messages || []), { role: 'user', content: text }]
+
+  // Detect order intent → extract structured JSON with Claude Haiku
+  if (RE_ORDER_KEYWORDS.test(text)) {
+    const extracted = await extractOrderWithClaude(session.ville, updatedMessages)
+
+    if (extracted && extracted.items && extracted.items.length > 0) {
+      // Check if any pizza is missing size → ask via Claude Q&A
+      const missingSize = extracted.items.some(i => !i.size && isPizzaName(i.name))
+      if (missingSize) {
+        const reply = await claudeMenuAnswer(session.ville, updatedMessages)
+        await updateSession(session.id, {
+          messages: [...updatedMessages, { role: 'assistant', content: reply }],
+        })
+        await sendWhatsAppMessage(phone, reply)
+        return
+      }
+
+      const orderSummary = {
+        ville:          session.ville,
+        articles:       extracted.items.map(i => ({ nom: i.name, qty: i.qty, prix: i.price, taille: i.size })),
+        total_articles: extracted.total,
+        total_final:    extracted.total,
+      }
+
+      await updateSession(session.id, {
+        state:         STATE.CHOOSING_DELIVERY_MODE,
+        messages:      updatedMessages,
+        order_summary: orderSummary,
+      })
+
+      const recap = formatOrderRecap(extracted.items, extracted.total)
+      await sendWhatsAppMessage(phone, recap)
+      await sendWhatsAppMessage(phone, MSG.CHOOSE_DELIVERY_MODE)
+      return
+    }
+  }
+
+  // Default: Claude answers the menu question
+  const reply = await claudeMenuAnswer(session.ville, updatedMessages)
+  await updateSession(session.id, {
+    messages: [...updatedMessages, { role: 'assistant', content: reply }],
+  })
+  await sendWhatsAppMessage(phone, reply)
+}
+
+async function handleChoosingDeliveryMode(phone, session, trimmed) {
+  const wantsDelivery = /^1$|livraison|domicile/i.test(trimmed)
+  const wantsPickup   = /^2$|emporter|chercher|sur place/i.test(trimmed)
+
+  if (wantsDelivery) {
+    await updateSession(session.id, { state: STATE.WAITING_ADDRESS, delivery_mode: 'delivery' })
+    await sendWhatsAppMessage(phone, MSG.WAITING_ADDRESS)
+    return
+  }
+
+  if (wantsPickup) {
+    await handlePickup(phone, session)
+    return
+  }
+
+  await sendWhatsAppMessage(phone, MSG.CHOOSE_DELIVERY_MODE)
+}
+
+async function handleWaitingAddress(phone, session, address) {
+  const { ville, order_summary: order } = session
+  const managerPhone = MANAGER_MAP[ville]
+
+  await updateSession(session.id, {
+    state:            STATE.WAITING_DELIVERY_PRICE,
+    delivery_address: address,
+  })
+
+  if (managerPhone && order) {
+    const items = formatItemsForManager(order.articles)
+    await sendWhatsAppMessage(managerPhone,
+      `🛒 Nouvelle commande — ${ville}\n` +
+      `👤 Client : +${phone}\n` +
+      `📦 Articles :\n${items}\n` +
+      `💰 Sous-total : ${order.total_articles} FCFA\n` +
+      `📍 Adresse : ${address}\n\n` +
+      `❓ Quel est le prix de livraison ? Répondez avec le montant total (articles + livraison).`)
+  }
+
+  await sendWhatsAppMessage(phone, 'Commande transmise. Nous revenons avec le prix de livraison bientôt.')
+}
+
+async function handlePickup(phone, session) {
+  const { ville, order_summary: order } = session
+  const managerPhone = MANAGER_MAP[ville]
+
+  await updateSession(session.id, {
+    state:         STATE.WAITING_PAYMENT,
+    delivery_mode: 'pickup',
+    delivery_price: 0,
+  })
+
+  if (managerPhone && order) {
+    const items = formatItemsForManager(order.articles)
+    await sendWhatsAppMessage(managerPhone,
+      `🛒 Nouvelle commande — ${ville}\n` +
+      `👤 Client : +${phone}\n` +
+      `📦 Articles :\n${items}\n` +
+      `💰 Total : ${order.total_articles} FCFA\n\n` +
+      `🏃 COMMANDE À EMPORTER\n✅ Confirmée via l'agent IA`)
+  }
+
+  await sendWhatsAppMessage(phone, formatPaymentMessage(ville, order, 0, 'pickup'))
+}
+
+async function handleQualityResponse(phone, session, trimmed) {
+  const responses = {
+    '1': 'Merci ! Votre satisfaction est notre priorité. À très bientôt chez C Pizza ! 🍕',
+    '2': 'Merci ! Nous ferons encore mieux la prochaine fois. À bientôt !',
+    '3': "Merci pour votre honnêteté. Nous prenons note et allons améliorer.",
+  }
+  const reply = responses[trimmed] || 'Merci pour votre retour ! À très bientôt chez C Pizza.'
+  await sendWhatsAppMessage(phone, reply)
+}
+
+async function handleBranchChange(phone, session) {
+  if (!session) {
+    await createSession(phone, null)
+    await sendWhatsAppMessage(phone, `D'accord !\n\n${MSG.CHOOSE_BRANCH}`)
+    return
+  }
+
+  const pendingItems = session.order_summary?.articles || null
+
+  await updateSession(session.id, {
+    state:         STATE.BRANCH_CHANGE_PENDING,
+    ville:         null,
+    delivery_mode: null,
+    delivery_address: null,
+    delivery_price: null,
+    order_summary: pendingItems ? { pending_items: pendingItems } : null,
+    messages:      pendingItems ? (session.messages || []) : [],
+  })
+
+  await sendWhatsAppMessage(phone, `D'accord !\n\n${MSG.CHOOSE_BRANCH}`)
+}
+
+// ─── Manager message handler ──────────────────────────────────────────────────
+
+async function handleManagerMessage(managerPhone, branch, text) {
+  const norm = text.trim().toUpperCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+
+  // Case 1: manager is replying with delivery price (WAITING_DELIVERY_PRICE)
+  const { data: deliverySessions } = await supabase
     .from('sessions')
     .select('*')
-    .eq('phone_number', customerPhone)
-    .in('order_status', ACTIVE_STATUSES)
+    .eq('state', STATE.WAITING_DELIVERY_PRICE)
+    .eq('ville', branch)
     .order('created_at', { ascending: false })
     .limit(1)
 
-  if (selectError) {
-    console.error('Supabase select error:', selectError)
-    throw new Error(`Session lookup failed: ${selectError.message}`)
-  }
+  const ds = deliverySessions?.[0]
+  if (ds) {
+    const priceMatch = text.match(/\b(\d{3,6})\b/)
+    const price      = priceMatch ? parseInt(priceMatch[1]) : null
 
-  let session = sessions?.[0] || null
-
-  // ── 2. STAR RATING (response to quality follow-up) ─────────────────────────
-  if (session?.order_status === 'quality_sent') {
-    const n = parseInt(trimmed)
-    if (n === 5) {
-      await sendWhatsAppMessage(customerPhone, 'Merci ! 🙏 Votre satisfaction est notre priorité.')
-    } else if (n === 4) {
-      await sendWhatsAppMessage(customerPhone, 'Merci ! Nous ferons encore mieux la prochaine fois.')
-    } else if (n === 3) {
-      await sendWhatsAppMessage(customerPhone, "Merci pour votre honnêteté. Nous prenons note et allons améliorer. N'hésitez pas à appeler l'agence directement.")
-    } else {
-      await sendWhatsAppMessage(customerPhone, 'Merci pour votre retour ! À très bientôt chez C Pizza.')
-    }
-    return
-  }
-
-  // ── 3. ORDER RESTORE CHOICE after branch change ────────────────────────────
-  if (session?.order_status === 'awaiting_order_restore') {
-    if (trimmed === '1' && session.messages?.length > 0) {
-      await supabase.from('sessions').update({
-        order_status: 'active',
-        order_summary: null,
-      }).eq('id', session.id)
-      await sendWhatsAppMessage(customerPhone, 'Commande conservée. Voulez-vous ajouter quelque chose ?')
-    } else {
-      await supabase.from('sessions').update({
-        order_status: 'active',
-        messages: [],
-        order_summary: null,
-      }).eq('id', session.id)
-      await sendWhatsAppMessage(customerPhone, "C'est parti ! Comment puis-je vous aider ?")
-    }
-    return
-  }
-
-  const effectiveVille = villeDetectee ||
-    (session && VALID_BRANCHES.includes(session.ville) ? session.ville : null)
-
-  // Menu request — send images regardless of state
-  if (isMenuRequest) {
-    await sendMenuImages(customerPhone)
-    await sendWhatsAppMessage(customerPhone,
-      effectiveVille
-        ? "Voici notre menu. Qu'est-ce qui vous fait envie ?"
-        : BRANCH_MENU)
-    return
-  }
-
-  // ── 4. DELIVERY OR PICKUP choice ───────────────────────────────────────────
-  if (session?.order_status === 'awaiting_delivery_mode') {
-    const wantsDelivery = /^1$|livraison|domicile/i.test(trimmed)
-    const wantsPickup   = /^2$|emporter|chercher|sur place/i.test(trimmed)
-
-    if (wantsDelivery) {
-      const knownAddress = session.delivery_address
-      if (knownAddress) {
-        await sendToManagerForDeliveryPrice(customerPhone, session, knownAddress)
-      } else {
-        await supabase.from('sessions').update({
-          order_status: 'awaiting_delivery_address',
-          delivery_mode: 'delivery',
-        }).eq('id', session.id)
-        await sendWhatsAppMessage(customerPhone,
-          'Quelle est votre adresse de livraison ? (quartier, rue, repère...)')
-      }
+    if (price && price > 0) {
+      await updateSession(ds.id, {
+        state:          STATE.WAITING_PAYMENT,
+        delivery_price: price,
+        order_summary:  {
+          ...(ds.order_summary || {}),
+          total_final: (ds.order_summary?.total_articles || 0) + price,
+        },
+      })
+      await sendWhatsAppMessage(ds.phone_number,
+        formatPaymentMessage(branch, ds.order_summary, price, 'delivery'))
       return
     }
-
-    if (wantsPickup) {
-      await handlePickupConfirmed(customerPhone, session)
-      return
-    }
-
-    // Unrecognised input — re-ask
-    await sendWhatsAppMessage(customerPhone,
-      'Comment récupérez-vous votre commande ?\n1. Livraison à domicile\n2. À emporter')
-    return
   }
 
-  // ── 5. DELIVERY ADDRESS collection ────────────────────────────────────────
-  if (session?.order_status === 'awaiting_delivery_address') {
-    await sendToManagerForDeliveryPrice(customerPhone, session, trimmed)
-    return
-  }
+  // Case 2: manager confirms or rejects payment (WAITING_MANAGER_CONFIRMATION)
+  const { data: confirmSessions } = await supabase
+    .from('sessions')
+    .select('*')
+    .eq('state', STATE.WAITING_MANAGER_CONFIRMATION)
+    .eq('ville', branch)
+    .order('payment_pending_since', { ascending: true })
+    .limit(1)
 
-  // ── 6. Waiting for manager delivery price ─────────────────────────────────
-  if (session?.order_status === 'awaiting_delivery_price') {
-    await sendWhatsAppMessage(customerPhone,
-      'Votre commande est en cours de traitement. Nous revenons avec le prix de livraison bientôt.')
-    return
-  }
+  const cs = confirmSessions?.[0]
+  if (!cs) return
 
-  // ── 7. Waiting for payment screenshot ─────────────────────────────────────
-  if (session?.order_status === 'awaiting_payment') {
-    await sendWhatsAppMessage(customerPhone,
-      "Envoyez la capture d'écran de votre paiement pour finaliser, ou payez en cash.")
-    return
-  }
-
-  // ── Branch selection ───────────────────────────────────────────────────────
-  if (!effectiveVille) {
-    const selectedVille = BRANCH_CHOICES[trimmed]
-
-    if (selectedVille) {
-      if (session) {
-        const hasPendingOrder = session.order_status === 'branch_change_pending' && session.messages?.length > 0
-        const pendingItemsText = session.order_summary?.pending_items_text
-
-        const { error } = await supabase
-          .from('sessions')
-          .update({
-            ville: selectedVille,
-            order_status: hasPendingOrder ? 'awaiting_order_restore' : 'active',
-            messages: hasPendingOrder ? session.messages : [],
-          })
-          .eq('id', session.id)
-        if (error) console.error('Branch update error:', error)
-        session = { ...session, ville: selectedVille }
-
-        if (hasPendingOrder) {
-          const orderDesc = pendingItemsText
-            ? `Vous aviez commencé une commande : ${pendingItemsText}.`
-            : `Vous aviez une commande en cours.`
-          await sendWhatsAppMessage(customerPhone,
-            `${orderDesc} Voulez-vous la garder ou en passer une nouvelle ?\n1 - Garder ma commande\n2 - Nouvelle commande`)
-        } else {
-          await sendWhatsAppMessage(customerPhone,
-            `Bienvenue à C Pizza ${selectedVille} ! Comment puis-je vous aider ?`)
-        }
-      } else {
-        const { data: newSession, error } = await supabase
-          .from('sessions')
-          .insert({ phone_number: customerPhone, ville: selectedVille, messages: [], order_status: 'active' })
-          .select()
-          .single()
-        if (error) throw new Error(`Session creation failed: ${error.message}`)
-        session = newSession
-        await sendWhatsAppMessage(customerPhone,
-          `Bienvenue à C Pizza ${selectedVille} ! Comment puis-je vous aider ?`)
-      }
-      return
-    }
-
-    // Not a recognised branch number — save session if new, then ask for branch
-    if (!session) {
-      const { error } = await supabase
-        .from('sessions')
-        .insert({ phone_number: customerPhone, ville: null, messages: [{ role: 'user', content: text }], order_status: 'active' })
-      if (error) console.error('Supabase insert error (no-branch):', error)
-    }
-    await sendWhatsAppMessage(customerPhone, BRANCH_MENU)
-    return
-  }
-
-  // ── Ensure session exists with a known branch ──────────────────────────────
-  if (!session) {
-    const { data: newSession, error: insertError } = await supabase
-      .from('sessions')
-      .insert({ phone_number: customerPhone, ville: effectiveVille, messages: [], order_status: 'active' })
-      .select()
-      .single()
-    if (insertError) throw new Error(`Session creation failed: ${insertError.message}`)
-    session = newSession
-  }
-
-  if (session.order_status !== 'active') return
-
-  // ── Claude conversation ───────────────────────────────────────────────────
-  const updatedMessages = [
-    ...(session.messages || []),
-    { role: 'user', content: text },
-  ]
-
-  const claudeResponse = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
-    system: getSystemPrompt(effectiveVille),
-    messages: updatedMessages,
-  })
-
-  const reply      = claudeResponse.content[0].text
-  const isConfirmed = reply.includes('##COMMANDE_CONFIRMEE##')
-  const cleanReply  = reply.replace(/##COMMANDE_CONFIRMEE##[\s\S]*/, '').trim()
-  let orderSummary  = null
+  const customerPhone = cs.phone_number
+  const isDelivery    = cs.delivery_mode !== 'pickup'
+  const isConfirmed   = /\b(OUI|RECU|OK|CONFIRME)\b/.test(norm)
+  const isRejected    = /\bNON\b/.test(norm) || norm.includes('PAS RECU')
 
   if (isConfirmed) {
-    const jsonMatch = reply.match(/##COMMANDE_CONFIRMEE##\s*(\{[\s\S]*\})/)
-    if (jsonMatch) {
-      try { orderSummary = JSON.parse(jsonMatch[1]) } catch {}
-    }
-  }
-
-  await supabase.from('sessions').update({
-    messages: [...updatedMessages, { role: 'assistant', content: cleanReply }],
-    ...(isConfirmed && {
-      order_status:    'awaiting_delivery_mode',
-      order_summary:   orderSummary,
-      payment_method:  orderSummary?.paiement,
-      delivery_address: villeDetectee || null,
-    }),
-  }).eq('id', session.id)
-
-  if (cleanReply) await sendWhatsAppMessage(customerPhone, cleanReply)
-
-  if (isConfirmed) {
+    await updateSession(cs.id, { state: STATE.CONFIRMED })
     await sendWhatsAppMessage(customerPhone,
-      'Comment récupérez-vous votre commande ?\n1. Livraison à domicile\n2. À emporter')
+      isDelivery ? MSG.CONFIRMED_DELIVERY : MSG.CONFIRMED_PICKUP)
+    scheduleQualityFollowUp(customerPhone, cs.id, cs.ville)
+  } else if (isRejected) {
+    await updateSession(cs.id, { state: STATE.WAITING_PAYMENT })
+    await sendWhatsAppMessage(customerPhone, MSG.PAYMENT_REJECTED)
   }
 }
 
-// Extract a short item summary from conversation history using Claude Haiku
-async function extractOrderSummary(messages) {
-  try {
-    const resp = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 100,
-      system: "Extrais les articles commandés de cette conversation en une liste courte (ex: '1x Regina XL, 2x Coca'). Si aucun article n'a été commandé, retourne une chaîne vide.",
-      messages: messages.slice(-8),
-    })
-    const result = resp.content[0].text.trim()
-    return result || null
-  } catch {
-    return null
-  }
-}
+// ─── Payment image handler ────────────────────────────────────────────────────
 
-// Step 2 of delivery flow: ask manager for delivery price
-async function sendToManagerForDeliveryPrice(customerPhone, session, address) {
-  const ville        = session.order_summary?.ville || session.ville
-  const managerPhone = MANAGER_MAP[ville]
-  const order        = session.order_summary
-
-  await supabase.from('sessions').update({
-    order_status:     'awaiting_delivery_price',
-    delivery_mode:    'delivery',
-    delivery_address: address,
-  }).eq('id', session.id)
-
-  if (managerPhone && order) {
-    const items = (order.articles || [])
-      .map(a => `  • ${a.qty}x ${a.nom} = ${a.prix * a.qty} FCFA`)
-      .join('\n')
-    await sendWhatsAppMessage(managerPhone,
-      `🛒 Nouvelle commande — ${ville}\n` +
-      `👤 Client: +${customerPhone}\n` +
-      `📦 Articles:\n${items}\n` +
-      `💰 Sous-total: ${order.total_articles || 0} FCFA\n` +
-      `📍 Adresse de livraison: ${address}\n\n` +
-      `❓ Quel est le prix de livraison ? Répondez avec le montant total (articles + livraison)`)
-  }
-
-  await sendWhatsAppMessage(customerPhone,
-    'Commande transmise à notre équipe. Nous revenons avec le prix de livraison bientôt.')
-}
-
-// Pickup flow: notify manager and send payment recap immediately
-async function handlePickupConfirmed(customerPhone, session) {
-  const ville        = session.order_summary?.ville || session.ville
-  const managerPhone = MANAGER_MAP[ville]
-  const order        = session.order_summary
-
-  await supabase.from('sessions').update({
-    order_status:  'awaiting_payment',
-    delivery_mode: 'pickup',
-  }).eq('id', session.id)
-
-  if (managerPhone && order) {
-    const items = (order.articles || [])
-      .map(a => `  • ${a.qty}x ${a.nom} = ${a.prix * a.qty} FCFA`)
-      .join('\n')
-    await sendWhatsAppMessage(managerPhone,
-      `🛒 Nouvelle commande — ${ville}\n` +
-      `👤 Client: +${customerPhone}\n` +
-      `📦 Articles:\n${items}\n` +
-      `💰 Total: ${order.total_articles || 0} FCFA\n\n` +
-      `🏃 COMMANDE À EMPORTER — le client viendra chercher sur place\n\n` +
-      `✅ Confirmée via l'agent IA`)
-  }
-
-  await sendWhatsAppMessage(customerPhone, formatCustomerPaymentRecap(ville, order, 0, 'pickup'))
-}
-
-// Called when a customer sends an image (payment screenshot)
-async function handlePaymentImage({ customerPhone, mediaId }) {
+async function handlePaymentImage(phone, mediaId) {
   const { data: sessions } = await supabase
     .from('sessions')
     .select('*')
-    .eq('phone_number', customerPhone)
-    .in('order_status', ['awaiting_payment', 'confirmed'])
+    .eq('phone_number', phone)
+    .eq('state', STATE.WAITING_PAYMENT)
     .order('created_at', { ascending: false })
     .limit(1)
 
   const session = sessions?.[0]
   if (!session) {
-    await sendWhatsAppMessage(customerPhone,
-      'Aucune commande en cours. Veuillez recommencer.')
+    await sendWhatsAppMessage(phone, 'Aucune commande en attente de paiement. Recommencez si besoin.')
     return
   }
 
-  const ville        = session.order_summary?.ville || session.ville
-  const managerPhone = MANAGER_MAP[ville]
+  const managerPhone = MANAGER_MAP[session.ville]
   if (!managerPhone) {
-    console.error('No manager phone for ville:', ville)
+    console.error('No manager phone for branch:', session.ville)
     return
   }
 
-  await supabase.from('sessions').update({
-    order_status:          'payment_pending_manager',
+  const order = session.order_summary
+  const items = formatItemsForManager(order?.articles)
+
+  await updateSession(session.id, {
+    state:                 STATE.WAITING_MANAGER_CONFIRMATION,
     payment_pending_since: new Date().toISOString(),
-  }).eq('id', session.id)
+  })
 
   await sendWhatsAppImage(managerPhone, mediaId)
   await sendWhatsAppMessage(managerPhone,
-    `💳 Preuve de paiement reçue pour la commande de +${customerPhone}. Confirmez-vous la réception ? Répondez *OUI* ou *NON*`)
+    `💳 Preuve de paiement reçue — ${session.ville}\n` +
+    `👤 Client : +${phone}\n` +
+    `📦 Commande :\n${items}\n` +
+    `💰 Total : ${order?.total_final || order?.total_articles || 0} FCFA\n` +
+    `🚚 Mode : ${session.delivery_mode === 'pickup' ? 'À emporter' : 'Livraison'}\n\n` +
+    `Confirmez-vous la réception ? Répondez OUI ou NON`)
 
-  await sendWhatsAppMessage(customerPhone,
-    "Capture d'écran reçue. Notre équipe vérifie votre paiement.")
+  await sendWhatsAppMessage(phone, MSG.PAYMENT_RECEIVED)
 }
 
-// Called when a manager sends a message
-async function handleManagerResponse({ managerPhone, branch, text }) {
-  const norm = text.trim().toUpperCase()
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+// ─── Claude helpers (BROWSING and ORDERING only) ──────────────────────────────
 
-  // ── Check if manager is responding to a delivery price request ─────────────
-  const { data: deliverySessions } = await supabase
-    .from('sessions')
-    .select('*')
-    .eq('order_status', 'awaiting_delivery_price')
-    .order('created_at', { ascending: false })
+async function claudeMenuAnswer(ville, messages) {
+  const resp = await anthropic.messages.create({
+    model:      'claude-sonnet-4-6',
+    max_tokens: 512,
+    system:     getMenuSystemPrompt(ville),
+    messages,
+  })
+  return resp.content[0].text
+}
 
-  const deliverySession = deliverySessions?.find(s =>
-    (s.order_summary?.ville || s.ville) === branch
-  )
+async function extractOrderWithClaude(ville, messages) {
+  const system = `Tu es un extracteur de commandes pour C Pizza ${ville}.
+Analyse cette conversation et retourne UNIQUEMENT du JSON valide, sans texte supplémentaire.
 
-  if (deliverySession) {
-    const priceMatch   = text.match(/\b(\d{3,6})\b/)
-    const deliveryPrice = priceMatch ? parseInt(priceMatch[1]) : null
+Format:
+{"items": [{"name": "Nom de l'article", "size": "XL", "qty": 1, "price": 6500}], "total": 6500}
 
-    if (deliveryPrice && deliveryPrice > 0) {
-      const customerPhone = deliverySession.phone_number
-      const ville         = deliverySession.order_summary?.ville || deliverySession.ville
-      const order         = deliverySession.order_summary
+Règles:
+- Sizes valides pour pizzas: M, XL, XXL uniquement. Si non précisée, mets null.
+- Prix selon le menu C Pizza (M=4000, XL=6500, XXL=7500 pour pizzas classiques).
+- Si aucune commande claire, retourne: {"items": [], "total": 0}
+- Ne retourne que du JSON, aucun autre texte.`
 
-      await supabase.from('sessions').update({
-        order_status:   'awaiting_payment',
-        delivery_price: deliveryPrice,
-      }).eq('id', deliverySession.id)
+  const resp = await anthropic.messages.create({
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 512,
+    system,
+    messages:   messages.slice(-8),
+  })
 
-      await sendWhatsAppMessage(customerPhone,
-        formatCustomerPaymentRecap(ville, order, deliveryPrice, 'delivery'))
-      return
-    }
-  }
-
-  // ── Handle OUI/NON payment confirmation ────────────────────────────────────
-  const { data: sessions } = await supabase
-    .from('sessions')
-    .select('*')
-    .eq('order_status', 'payment_pending_manager')
-    .order('payment_pending_since', { ascending: true })
-
-  const session = sessions?.find(s => (s.order_summary?.ville || s.ville) === branch)
-  if (!session) return
-
-  const customerPhone = session.phone_number
-  const isDelivery    = session.delivery_mode !== 'pickup'
-  const isConfirmed   = /\b(OUI|RECU|CONFIRME)\b/.test(norm)
-  const isRejected    = /\bNON\b/.test(norm) || norm.includes('PAS RECU')
-
-  if (isConfirmed) {
-    await supabase.from('sessions').update({ order_status: 'payment_confirmed' }).eq('id', session.id)
-    const confirmMsg = isDelivery
-      ? 'Commande confirmée ! Le livreur vous contactera dans les 30 minutes. 🍕'
-      : 'Commande confirmée ! Prête dans 20–30 minutes. À tout de suite ! 🍕'
-    await sendWhatsAppMessage(customerPhone, confirmMsg)
-    scheduleQualityFollowUp(customerPhone, session.id)
-  } else if (isRejected) {
-    await supabase.from('sessions').update({ order_status: 'payment_failed' }).eq('id', session.id)
-    await sendWhatsAppMessage(customerPhone,
-      "Paiement non reçu. Vérifiez et renvoyez votre capture d'écran, ou contactez l'agence directement.")
+  try {
+    const raw  = resp.content[0].text.trim()
+    const match = raw.match(/\{[\s\S]*\}/)
+    return match ? JSON.parse(match[0]) : null
+  } catch {
+    return null
   }
 }
 
-// Schedule quality follow-up 1 hour after payment confirmation
-function scheduleQualityFollowUp(customerPhone, sessionId) {
-  setTimeout(async () => {
-    try {
-      await supabase.from('sessions').update({ order_status: 'quality_sent' }).eq('id', sessionId)
-      await sendWhatsAppMessage(customerPhone,
-        'Votre commande C Pizza s\'était bien passée ? 😊\n' +
-        'Notez-nous :\n5 — Excellent | 4 — Bien | 3 — À améliorer\n\n' +
-        'Laissez aussi un avis Google :\n' +
-        '- C Pizza Yassa : https://www.google.com/maps/place/Cpizza+Yassa/@4.0047507,9.8030823,11z/data=!4m12!1m2!2m1!1scpizza!3m8!1s0x106173005fbb98b9:0xcf32a1e9b7b142e!8m2!3d4.0047507!4d9.8030823!9m1!1b1!15sCgZjcGl6emFaCCIGY3BpenphkgEQcGl6emFfcmVzdGF1cmFudJoBJENoZERTVWhOTUc5blMwVkpRMEZuU1VSdWJIRjJTVzlCUlJBQuABAPoBBAgAEEQ!16s%2Fg%2F11wfr52jq2\n' +
-        '- C Pizza Bonamoussadi : https://www.google.com/maps/place/C+Pizza+Bonamoussadi+690455453/@4.0914659,9.4445091,11z/data=!4m10!1m2!2m1!1scpizza!3m6!1s0x10610f0026ae5307:0x67d54a93eab2b68b!8m2!3d4.0914659!4d9.7493797!15sCgZjcGl6emFaCCIGY3BpenphkgEQcGl6emFfcmVzdGF1cmFudJoBRENpOERRVWxSUVVOdlpFTm9kSGxqUmpsdlQyeGFWazlGZHhZYkxJyllCQQ!16s%2Fg%2F11wb00djcr\n\n' +
-        'Merci d\'avoir choisi C Pizza !')
-    } catch (err) {
-      console.error('Quality follow-up error:', err)
-    }
-  }, 3600000)
-}
+function getMenuSystemPrompt(ville) {
+  return `Tu es l'assistant menu de C Pizza, agence ${ville}.
+Ton rôle : répondre aux questions sur le menu, décrire les pizzas, suggérer des articles.
+Tu ne prends PAS les commandes toi-même et tu ne rediriges JAMAIS vers les agences.
+Messages courts (3–4 lignes max), 1–2 emojis max.
+Réponds en français (ou anglais si le client écrit en anglais).
+Tailles disponibles : M, XL, XXL uniquement.
 
-// Sends timeout message to customers whose payment was never confirmed
-async function checkPaymentTimeouts() {
-  const cutoff = new Date(Date.now() - PAYMENT_TIMEOUT_MS).toISOString()
-  const { data: expired } = await supabase
-    .from('sessions')
-    .select('*')
-    .eq('order_status', 'payment_pending_manager')
-    .lt('payment_pending_since', cutoff)
+MENU C PIZZA :
 
-  if (!expired?.length) return
-
-  for (const session of expired) {
-    await supabase.from('sessions')
-      .update({ order_status: 'payment_timeout' })
-      .eq('id', session.id)
-    await sendWhatsAppMessage(session.phone_number,
-      'Notre équipe vérifie votre paiement. Vous serez notifié bientôt.')
-  }
-}
-
-// Build the payment recap message sent to the customer
-function formatCustomerPaymentRecap(ville, order, deliveryPrice, mode) {
-  const payment    = BRANCH_PAYMENT_INFO[ville] || {}
-  const foodTotal  = order?.total_articles || 0
-  const grandTotal = foodTotal + deliveryPrice
-
-  const items = (order?.articles || [])
-    .map(a => `• ${a.qty}x ${a.nom} — ${a.prix * a.qty} FCFA`)
-    .join('\n')
-
-  let paymentOptions = `1. Orange Money → ${payment.om || 'Voir numéro agence'}`
-  if (payment.mtn) paymentOptions += `\n2. MTN Mobile Money → ${payment.mtn}`
-  paymentOptions += `\n3. Cash ${mode === 'pickup' ? 'sur place' : 'à la livraison'}`
-
-  return (
-    `Récapitulatif de votre commande :\n${items}\n\n` +
-    `Sous-total articles: ${foodTotal} FCFA\n` +
-    (mode === 'delivery' ? `Frais de livraison: ${deliveryPrice} FCFA\n` : '') +
-    `TOTAL À PAYER: ${grandTotal} FCFA\n\n` +
-    `Envoyez le paiement à :\n${paymentOptions}\n\n` +
-    `Puis envoyez-nous la capture d'écran.`
-  )
-}
-
-function getSystemPrompt(ville) {
-  return `Tu es l'agent de commande WhatsApp de C Pizza, agence ${ville}.
-Tu es chaleureux, professionnel et tu réponds toujours en français.
-
-## FORMAT DE RÉPONSE
-- Messages courts et directs (3-4 lignes maximum)
-- Une idée par message, pas de longs paragraphes
-- Maximum 1-2 emojis par message — certains messages peuvent n'en avoir aucun
-- Ne jamais mettre des astérisques autour des noms (clients, agences, pizzas). Écris "C Pizza Yassa" et non "*C Pizza Yassa*".
-
-## INFORMATIONS PAR AGENCE
-
-### YASSA (Douala)
-- WhatsApp : 659 93 94 43
-- Orange Money marchand : Code 768309 — CPizza Akwa 2
-- MTN MoMo marchand : Code 737017 — CPizza SARL 2
-- Heures : 12h–22h, 7j/7 | Livraison : 13h–21h
-- Zones & prix livraison :
-  • 500 FCFA → Neptune, Total Nkolbong, Tradex Yassa (alentours immédiats)
-  • 1000–1500 FCFA → selon distance
-
-### ESSOS (Yaoundé)
-- WhatsApp : 699 74 25 28
-- Orange Money marchand : Code 24 96 89 — CPizza Essos
-- MTN MoMo : Non disponible
-- Heures : 12h–22h, 7j/7
-- Zones : Yaoundé 5 (Essos, Omnisport, Fouda, Elig-Essono, Mimboman), Yaoundé 4, Yaoundé 3
-- Prix livraison :
-  • 500 FCFA → Essos centre, Omnisport
-  • 1000 FCFA → Fouda, Elig-Essono
-  • 1500 FCFA → Mimboman, Yaoundé 4 et 3
-
-### ODZA (Yaoundé)
-- WhatsApp : 657 70 74 20
-- Orange Money : 696 297 418 — Code 827367 — Massop Pengou
-- MTN MoMo : 680 362 222 — Arlette Massop Pengou
-- Heures : 11h–22h30, 7j/7
-- Zones : Yaoundé 3 (Odza, Messamendongo, Awae, Tropicana, Borne 12, Ahala, Petit Marché), Minkan, Terminus Odza, Fecafoot, Nkolnda, Mvan
-- Prix livraison :
-  • 1000 FCFA → Odza centre, Messamendongo proche
-  • 1500 FCFA → Awae, Tropicana, zones éloignées
-
-### BONAMOUSSADI (Douala)
-- WhatsApp : 694 67 20 92
-- Orange Money : 695 58 96 02 — Code 21 56 84 — CPizza Makepe
-- MTN MoMo : 672 92 61 59
-- Heures : 12h–22h, 7j/7
-- Zones : Douala 5, Douala 4, New Bell, Douala 3, Douala 2
-- Prix livraison :
-  • 500 FCFA → Bonamoussadi immédiat, Makepe proche
-  • 1000 FCFA → Douala 4, Denver, Logpom
-  • 1500 FCFA → Douala 3, Bepanda
-  • 2000–2500 FCFA → New Bell, Douala 2, zones éloignées
-
-## MENU COMPLET C PIZZA
-
-### PIZZAS — LES CLASSIQUES
-Regina (fromage, tomate, champignons, jambon, basilic, herbes) : M 4000 / XL 6500 / XXL 7500
-Bolognaise (fromage, tomate, olive, boeuf, carotte, haricot vert) : M 4000 / XL 6500 / XXL 7500
-Hawaiienne (fromage, jambon, creme fraiche, basilic, ananas) : M 4000 / XL 6500 / XXL 7500
+PIZZAS — LES CLASSIQUES
+Regina (fromage, tomate, champignons, jambon, basilic) : M 4000 / XL 6500 / XXL 7500
+Bolognaise (fromage, tomate, olive, boeuf, carotte) : M 4000 / XL 6500 / XXL 7500
+Hawaiienne (fromage, jambon, crème, ananas) : M 4000 / XL 6500 / XXL 7500
 Andante (fromage, tomate, jambon, olive, ail, champignons) : M 4000 / XL 6500 / XXL 7500
-Vegetarienne (fromage, tomate, creme, olive, poivrons, champignons, oignon, basilic, mais) : M 4000 / XL 6500 / XXL 7500
+Végétarienne (fromage, tomate, crème, olive, poivrons, champignons) : M 4000 / XL 6500 / XXL 7500
 
-### PIZZAS — LES BONS PLANS
+PIZZAS — LES BONS PLANS
 Azur (fromage, tomate, basilic, saucisson) : M 4000 / XL 6500 / XXL 7500
 Mazurka (fromage, tomate, poivrons, boeuf, oignon) : M 4000 / XL 6000 / XXL 7000
 Margherita (fromage, tomate, basilic) : M 2500 / XL 5000 / XXL 6000
 
-### PIZZAS — LES GOURMANDES
-Caliente (fromage, tomate, champignons, olive, poivrons, poulet, pomme de terre) : M 4500 / XL 7500 / XXL 8500
-Poulet (fromage, tomate, champignons, creme, poulet, oignon, poivrons) : M 4500 / XL 7500 / XXL 8500
+PIZZAS — LES GOURMANDES
+Caliente (fromage, tomate, champignons, poivrons, poulet, pomme de terre) : M 4500 / XL 7500 / XXL 8500
+Poulet (fromage, tomate, champignons, crème, poulet, oignon) : M 4500 / XL 7500 / XXL 8500
 Salsa (fromage, tomate, champignons, jambon, poulet) : M 4500 / XL 7500 / XXL 8500
-Piano (fromage, tomate, poivrons, olive, creme, oignons, lardons, pomme de terre) : M 4500 / XL 7500 / XXL 8500
-Vosgienne (fromage, jambon, poivrons, creme, oignons, lardons, coriandre) : M 4500 / XL 7500 / XXL 8500
-Mexicaine (fromage, tomate, poivrons, boeuf, oignons, tomate, mais) : M 4500 / XL 7500 / XXL 8500
+Piano (fromage, tomate, poivrons, crème, oignons, lardons) : M 4500 / XL 7500 / XXL 8500
+Vosgienne (fromage, jambon, poivrons, crème, lardons, coriandre) : M 4500 / XL 7500 / XXL 8500
+Mexicaine (fromage, tomate, poivrons, boeuf, oignons, maïs) : M 4500 / XL 7500 / XXL 8500
 
-### PIZZAS — LES ORIGINALES
-Adagio (fromage, tomate, champignons, jambon, lardons, basilic, olive) : M 4500 / XL 7000 / XXL 8500
-Calypso (fromage, tomate, champignons, jambon, creme, crevette) : M 4500 / XL 7500 / XXL 8500
+PIZZAS — LES ORIGINALES
+Adagio (fromage, tomate, champignons, jambon, lardons, basilic) : M 4500 / XL 7000 / XXL 8500
+Calypso (fromage, tomate, champignons, jambon, crème, crevette) : M 4500 / XL 7500 / XXL 8500
 
-### PIZZAS — LES GENERUSES
-Delicia (fromage, tomate, champignons, olive, jambon, poivrons, creme, boeuf, poulet, lardons, mais) : M 5000 / XL 8000 / XXL 9500
-Speciale (fromage, tomate, champignons, olive, creme, boeuf, jambon poulet, cumin, mais, coriandre) : M 5000 / XL 8000 / XXL 9000
-Americaine (fromage, tomate, champignons, olive, jambon, boeuf, cumin, salami) : M 5000 / XL 8000 / XXL 9000
+PIZZAS — LES GÉNÉREUSES
+Delicia (fromage, tomate, champignons, jambon, boeuf, poulet, lardons) : M 5000 / XL 8000 / XXL 9500
+Speciale (fromage, tomate, champignons, crème, boeuf, jambon, poulet) : M 5000 / XL 8000 / XXL 9000
+Americaine (fromage, tomate, champignons, jambon, boeuf, salami) : M 5000 / XL 8000 / XXL 9000
 Celia (fromage, tomate, jambon, boeuf, oeuf dur) : M 4500 / XL 7500 / XXL 8500
-7eme Ciel (fromage, tomate, jambon, poulet, boeuf, champignons, cocktail epices 237) : M 4500 / XL 7500 / XXL 8500
+7ème Ciel (fromage, tomate, jambon, poulet, boeuf, champignons) : M 4500 / XL 7500 / XXL 8500
 
-### PIZZAS — LES UNIQUES
-Manipena (cheddar, mozzarella, tomate, poulet, boeuf, champignons, saucisson, jambon, creme) : M 5000 / XL 8000 / XXL 9500
-Sarabande (fromage, tomate, creme, basilic, crevette) : M 5000 / XL 8000 / XXL 9500
+PIZZAS — LES UNIQUES
+Manipena (cheddar, mozzarella, tomate, poulet, boeuf, champignons, saucisson) : M 5000 / XL 8000 / XXL 9500
+Sarabande (fromage, tomate, crème, basilic, crevette) : M 5000 / XL 8000 / XXL 9500
 
-### SUPPLEMENTS PIZZA
-Fromage : 1000–2000 FCFA | Charcuterie/Poulet/Viande : 1000 FCFA | Crevette : 1000–1500 FCFA | Autres : Gratuits | Emballage carton : 500 FCFA
+POULETS
+1/4 pané ou frit : 3000 | 1/2 : 5000 | Entier : 9000 FCFA
 
-### POULETS
-Poulet pane ou frit 1/4 : 3000 FCFA
-Poulet pane ou frit 1/2 : 5000 FCFA
-Poulet pane ou frit entier : 9000 FCFA
+CHAWARMA : Viande 2000 / Poulet 2500 FCFA
 
-### CHAWARMA
-Viande : 2000 FCFA | Poulet : 2500 FCFA
+BURGERS : Classic 1500 / Cheese 2000 / Double cheese 2500 FCFA
 
-### SANDWICHS & BURGERS
-Burger classic : 1500 FCFA
-Cheeseburger : 2000 FCFA
-Double cheeseburger : 2500 FCFA
-Portion frites plantain : 500 FCFA | Portion frites pomme : 1000 FCFA
+BOISSONS : Gazeuse 1L 1000 FCFA | Canette 1000 | Jus naturel 1L 2500 / verre 1000
+Eau 500 | Vin Elrojo 2500 | Tour Canteou blanc 4000 FCFA
 
-### SALADES
-Salade de crudites : 1500 FCFA
+EXTRAS : Frites plantain 500 / pomme 1000 | Brochettes porc 3000 | Riz frit boeuf 1500 / poulet 2000 / crevettes 3000
 
-### EXTRAS
-Portion frites plantain : 500 FCFA | Portion frites pomme : 1000 FCFA
-Brochettes de porc : 3000 FCFA | Cote de porc grille : 3000 FCFA | Saucisses de porc grille : 3000 FCFA
-Riz/pates frites crevettes : 3000 FCFA | Riz/pates frites poulet : 2000 FCFA | Riz/pates frites boeuf : 1500 FCFA
-Mix riz/pates poulet+viande+crevettes : 4500 FCFA | 2 Boules de glace : 1000 FCFA
-Boissons chaudes : OFFERTES avec toute commande
-
-### BOISSONS
-Boisson gazeuse 1L : 1000 FCFA (Fanta, Coca, Pamplemousse, Americana, Lipton, Cassonade, Vimto, Malta)
-Boisson gazeuse canette : 1000 FCFA
-Biere canette alcoolisee : 1000 FCFA | Biere sans alcool : 1000 FCFA
-Jus naturel : 2500 FCFA/1L — 1000 FCFA/verre (Ananas, Pasteque, Gingembre, Bissap, Baobab)
-Menthe au lait : 3000 FCFA/1L — 1000 FCFA/verre
-Jus d'oseille (folere) : 1500 FCFA/1L — 500 FCFA/verre
-Eau : 500 FCFA | Vin Elrojo petit : 2500 FCFA | Tour Canteou blanc : 4000 FCFA
-
-### FORMULES MEGA RETOUR (pour 4 personnes)
-Plan A — 10 000 FCFA : 01 Pizza XXL + 04 Boissons gazeuses + 01 Pain + 04 Salades
-Plan B — 10 000 FCFA : 01 Poulet entier + Frites + 04 Boissons + 01 Pain + 04 Salades
-Plan C — 10 000 FCFA : 04 Cheeses burgers + Frites + 04 Boissons + 01 Pain + 04 Salades
-Plan D — 6 000 FCFA : 04 Plats riz frit Mbounga + 04 Boissons + 01 Pain + 04 Salades
-Plan E — 7 000 FCFA : 04 Plats riz frit viande + 04 Boissons + 01 Pain + 04 Salades
-
-## FLUX DE CONVERSATION
-
-1. Accueille chaleureusement le client
-2. Si la commande vient du site web, elle contient deja les articles — confirme-les avec le total
-3. Si le client arrive directement sur WhatsApp, presente le menu par categories
-4. Prends la commande (articles, quantités, tailles)
-5. Présente le récapitulatif des articles et le total
-6. Confirme la commande finale
-
-## REGLES IMPORTANTES
-- Toujours demander la taille de pizza si non precisee. Tailles disponibles UNIQUEMENT : M, XL et XXL. Si le client demande une autre taille (S, L, petite, grande, etc.), réponds : "Nos pizzas sont disponibles en M, XL et XXL uniquement."
-- Les boissons chaudes sont offertes avec toute commande
-- Ne jamais inventer de prix ou d'articles
-- Repondre en francais (ou anglais si le client ecrit en anglais)
-- NE PAS demander l'adresse de livraison — ce sera géré automatiquement après la commande
-- NE PAS demander le mode de paiement ni les frais de livraison — gérés automatiquement
-- Ton rôle unique : prendre la commande (articles, quantités, tailles), puis émettre ##COMMANDE_CONFIRMEE##
-
-## LOGIQUE LIVRAISON ZONES NON LISTEES
-Tu connais la geographie de Douala et Yaounde. Si un client mentionne un quartier non liste, NE DIS JAMAIS "ce quartier ne figure pas dans nos zones". A la place :
-- Reflechis a la proximite avec les quartiers connus de l'agence
-- Estime une fourchette raisonnable
-- Informe le client que le prix exact sera confirme par le livreur
-- Exemple : quartier tres proche → 500–1000 FCFA | zone moyenne → 1000–1500 FCFA | zone eloignee → 1500–2500 FCFA
-
-## QUAND LA COMMANDE EST TOTALEMENT CONFIRMEE
-Termine ton message avec exactement ce bloc :
-##COMMANDE_CONFIRMEE##
-{
-  "ville": "${ville}",
-  "articles": [{"nom": "article", "qty": 1, "prix": 4000}],
-  "total_articles": 4000,
-  "frais_livraison": 0,
-  "total_final": 4000,
-  "adresse": "",
-  "paiement": "Orange Money | MTN MoMo | Cash"
-}`
+FORMULES MEGA (4 personnes) : Plan A–E : 6000–10000 FCFA`
 }
 
-async function sendMenuImages(to) {
-  console.log('[sendMenuImages] START — to:', to, 'PHONE_ID:', PHONE_ID, 'TOKEN:', !!process.env.WHATSAPP_TOKEN)
-  const results = await Promise.all(
-    MENU_URLS.map(async (imageUrl, i) => {
-      try {
-        const resp = await fetch(`https://graph.facebook.com/v19.0/${PHONE_ID}/messages`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'image', image: { link: imageUrl } }),
-        })
-        const respText = await resp.text()
-        console.log(`[sendMenuImages] img${i + 1} HTTP ${resp.status}:`, respText)
-        return resp.status
-      } catch (err) {
-        console.error(`[sendMenuImages] img${i + 1} threw:`, err.message)
-        return 'error'
-      }
+// ─── Formatting helpers ───────────────────────────────────────────────────────
+
+function formatPaymentMessage(ville, order, deliveryPrice, mode) {
+  const payment   = BRANCH_PAYMENT_INFO[ville] || {}
+  const foodTotal = order?.total_articles || 0
+  const total     = foodTotal + deliveryPrice
+
+  const items = (order?.articles || [])
+    .map(a => `• ${a.qty}x ${a.nom}${a.taille ? ` (${a.taille})` : ''} — ${(a.prix || 0) * a.qty} FCFA`)
+    .join('\n')
+
+  let payLine = `1. Orange Money → ${payment.om || 'Voir agence'}`
+  if (payment.mtn) payLine += `\n2. MTN MoMo → ${payment.mtn}`
+  payLine += `\n${payment.mtn ? '3' : '2'}. Cash ${mode === 'pickup' ? 'sur place' : 'à la livraison'}`
+
+  return `Total à payer : ${total} FCFA\n\n` +
+    `Récapitulatif :\n${items}\n` +
+    (deliveryPrice > 0 ? `Livraison : ${deliveryPrice} FCFA\n` : '') +
+    `\nPaiement :\n${payLine}\n\n` +
+    `Envoyez votre capture d'écran de paiement.`
+}
+
+function formatOrderRecap(items, total) {
+  const lines = items.map(i =>
+    `• ${i.qty}x ${i.name}${i.size ? ` (${i.size})` : ''} — ${(i.price || 0) * i.qty} FCFA`)
+  return `Votre commande :\n${lines.join('\n')}\n\nTotal : ${total} FCFA`
+}
+
+function formatItemsList(articles) {
+  if (!articles?.length) return '(aucun article)'
+  return articles.map(a => `• ${a.qty}x ${a.nom}${a.taille ? ` (${a.taille})` : ''}`).join('\n')
+}
+
+function formatItemsForManager(articles) {
+  if (!articles?.length) return '(aucun article)'
+  return articles.map(a => `  • ${a.qty}x ${a.nom}${a.taille ? ` (${a.taille})` : ''} = ${(a.prix || 0) * a.qty} FCFA`).join('\n')
+}
+
+function describeState(session) {
+  if (!session) return 'Aucune commande en cours. Envoyez un message pour commencer.'
+  const labels = {
+    [STATE.CHOOSING_BRANCH]:              'Sélection de l\'agence.',
+    [STATE.BRANCH_CHANGE_PENDING]:        'Changement d\'agence en cours.',
+    [STATE.RESTORING_ORDER]:              'Confirmation de commande précédente.',
+    [STATE.BROWSING]:                     `Navigation du menu — agence ${session.ville}.`,
+    [STATE.CHOOSING_DELIVERY_MODE]:       'Choix du mode de récupération.',
+    [STATE.WAITING_ADDRESS]:              'En attente de votre adresse de livraison.',
+    [STATE.WAITING_DELIVERY_PRICE]:       'En attente du prix de livraison (notre équipe calcule).',
+    [STATE.WAITING_PAYMENT]:              'En attente de votre paiement.',
+    [STATE.WAITING_MANAGER_CONFIRMATION]: 'Paiement en cours de vérification par notre équipe.',
+    [STATE.CONFIRMED]:                    'Commande confirmée !',
+    [STATE.QUALITY_FOLLOWUP]:             'Commande livrée. Merci !',
+  }
+  return labels[session.state] || 'Statut inconnu.'
+}
+
+// ─── Session helpers ──────────────────────────────────────────────────────────
+
+async function getActiveSession(phone) {
+  const { data } = await supabase
+    .from('sessions')
+    .select('*')
+    .eq('phone_number', phone)
+    .order('created_at', { ascending: false })
+    .limit(1)
+
+  const s = data?.[0]
+  if (!s) return null
+
+  // Migrate old sessions without a state column
+  if (!s.state) {
+    const state = migrateOldStatus(s.order_status, s.ville)
+    await updateSession(s.id, { state })
+    s.state = state
+  }
+
+  // Do not re-use terminal sessions
+  if (TERMINAL_STATES.has(s.state)) return null
+
+  return s
+}
+
+async function createSession(phone, ville) {
+  const { data, error } = await supabase
+    .from('sessions')
+    .insert({
+      phone_number: phone,
+      ville,
+      state:        ville ? STATE.BROWSING : STATE.CHOOSING_BRANCH,
+      messages:     [],
+      order_status: 'active',
     })
-  )
-  console.log('[sendMenuImages] DONE — statuses:', results.join(','))
+    .select()
+    .single()
+  if (error) throw new Error(`Session create failed: ${error.message}`)
+  return data
 }
+
+async function updateSession(id, fields) {
+  const { error } = await supabase.from('sessions').update(fields).eq('id', id)
+  if (error) console.error('Session update error:', error)
+}
+
+function migrateOldStatus(orderStatus, ville) {
+  const map = {
+    active:                   ville ? STATE.BROWSING : STATE.CHOOSING_BRANCH,
+    awaiting_delivery_mode:   STATE.CHOOSING_DELIVERY_MODE,
+    awaiting_delivery_address: STATE.WAITING_ADDRESS,
+    awaiting_delivery_price:  STATE.WAITING_DELIVERY_PRICE,
+    awaiting_payment:         STATE.WAITING_PAYMENT,
+    payment_pending_manager:  STATE.WAITING_MANAGER_CONFIRMATION,
+    payment_confirmed:        STATE.CONFIRMED,
+    quality_sent:             STATE.QUALITY_FOLLOWUP,
+    branch_change_pending:    STATE.BRANCH_CHANGE_PENDING,
+    awaiting_order_restore:   STATE.RESTORING_ORDER,
+  }
+  return map[orderStatus] || STATE.CHOOSING_BRANCH
+}
+
+// ─── Quality follow-up (1h after confirmation) ───────────────────────────────
+
+function scheduleQualityFollowUp(phone, sessionId, ville) {
+  const mapsLink = BRANCH_MAPS[ville] || 'https://maps.google.com/?q=CPizza+Cameroun'
+  setTimeout(async () => {
+    try {
+      await updateSession(sessionId, { state: STATE.QUALITY_FOLLOWUP })
+      await sendWhatsAppMessage(phone,
+        `Votre commande s'est bien passée ? Notez notre service :\n` +
+        `1. Excellent\n2. Bien\n3. À améliorer\n\n` +
+        `Laissez aussi un avis : ${mapsLink}`)
+    } catch (err) {
+      console.error('Quality followup error:', err)
+    }
+  }, 3600000)
+}
+
+// ─── Payment timeout check ────────────────────────────────────────────────────
+
+async function checkPaymentTimeouts() {
+  const cutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+  const { data: expired } = await supabase
+    .from('sessions')
+    .select('*')
+    .eq('state', STATE.WAITING_MANAGER_CONFIRMATION)
+    .lt('payment_pending_since', cutoff)
+
+  if (!expired?.length) return
+
+  for (const s of expired) {
+    await updateSession(s.id, { state: STATE.WAITING_PAYMENT })
+    await sendWhatsAppMessage(s.phone_number,
+      "Notre équipe n'a pas encore confirmé votre paiement. Vérifiez et renvoyez votre capture d'écran si besoin.")
+  }
+}
+
+// ─── Utility helpers ──────────────────────────────────────────────────────────
+
+function getManagerBranch(phone) {
+  for (const [branch, mgr] of Object.entries(MANAGER_MAP)) {
+    if (mgr && mgr === phone) return branch
+  }
+  return null
+}
+
+function isOutsideHours() {
+  const now  = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Douala' }))
+  const hour = now.getHours()
+  return hour < 12 || hour >= 22
+}
+
+function detectLanguage(text) {
+  return /\b(hello|hi|please|thank|order|want|menu|delivery|pizza|i would|i want|can i)\b/i.test(text)
+    ? 'en' : 'fr'
+}
+
+function isPizzaName(name) {
+  if (!name) return false
+  const pizzaNames = [
+    'regina', 'bolognaise', 'hawaiienne', 'andante', 'vegetarienne', 'azur',
+    'mazurka', 'margherita', 'caliente', 'poulet', 'salsa', 'piano', 'vosgienne',
+    'mexicaine', 'adagio', 'calypso', 'delicia', 'speciale', 'americaine',
+    'celia', '7eme ciel', 'manipena', 'sarabande',
+  ]
+  return pizzaNames.some(p => name.toLowerCase().includes(p))
+}
+
+// ─── WhatsApp API helpers ─────────────────────────────────────────────────────
 
 async function sendWhatsAppMessage(to, body) {
   const resp = await fetch(`https://graph.facebook.com/v19.0/${PHONE_ID}/messages`, {
-    method: 'POST',
+    method:  'POST',
     headers: {
-      'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
+      Authorization:  `Bearer ${process.env.WHATSAPP_TOKEN}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'text', text: { body } }),
   })
-  if (!resp.ok) {
-    const err = await resp.text()
-    console.error('WhatsApp send error:', err)
-  }
+  if (!resp.ok) console.error('WhatsApp send error:', await resp.text())
 }
 
 async function sendWhatsAppImage(to, mediaId) {
   const resp = await fetch(`https://graph.facebook.com/v19.0/${PHONE_ID}/messages`, {
-    method: 'POST',
+    method:  'POST',
     headers: {
-      'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
+      Authorization:  `Bearer ${process.env.WHATSAPP_TOKEN}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'image', image: { id: mediaId } }),
   })
-  if (!resp.ok) {
-    const err = await resp.text()
-    console.error('WhatsApp image send error:', err)
-  }
+  if (!resp.ok) console.error('WhatsApp image error:', await resp.text())
 }
 
-function formatAlerteManager(customerPhone, ville, order) {
-  const articles = (order.articles || [])
-    .map(a => `  • ${a.qty}x ${a.nom} = ${a.prix * a.qty} FCFA`)
-    .join('\n')
-  return (
-    `🍕 *Nouvelle commande — C Pizza ${ville}*\n\n` +
-    `👤 Client: +${customerPhone}\n` +
-    `📦 Commande:\n${articles}\n\n` +
-    `💰 Total articles: *${order.total_articles} FCFA*\n` +
-    `🚚 Frais livraison: *${order.frais_livraison} FCFA*\n` +
-    `💵 TOTAL FINAL: *${order.total_final} FCFA*\n` +
-    `📍 Adresse: ${order.adresse}\n` +
-    `💳 Paiement: ${order.paiement}\n\n` +
-    `✅ Confirmée via l'agent IA`
-  )
+async function sendMenuImages(to) {
+  await Promise.all(MENU_URLS.map(async (url, i) => {
+    try {
+      const resp = await fetch(`https://graph.facebook.com/v19.0/${PHONE_ID}/messages`, {
+        method:  'POST',
+        headers: {
+          Authorization:  `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'image', image: { link: url } }),
+      })
+      if (!resp.ok) console.error(`Menu img${i + 1} error:`, await resp.text())
+    } catch (err) {
+      console.error(`Menu img${i + 1} threw:`, err.message)
+    }
+  }))
 }
