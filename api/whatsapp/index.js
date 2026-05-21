@@ -369,8 +369,7 @@ async function handleBrowsing(phone, session, text, trimmed) {
       return
     }
 
-    // Amélioration 2 : handleUnknown si intent sans item
-    await handleUnknown(phone, session, text)
+    await sendWhatsAppMessage(phone, 'Quel plat souhaitez-vous ? Précisez le nom (ex: margherita, calypso, poulet...)')
     return
   }
 
@@ -671,9 +670,6 @@ async function getActiveSession(phone) {
   }
 
   if (TERMINAL_STATES.has(s.state)) return null
-
-  // Amélioration 1 & 10 : tout client repart du choix de ville
-  if (s.state === STATE.BROWSING) return null
 
   // Amélioration 4 : session de plus de 2h hors états pending → reset
   if (s.updated_at) {
