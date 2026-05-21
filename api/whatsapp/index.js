@@ -86,7 +86,7 @@ const MSG = {
 
   WAITING_ADDRESS: `Quelle est votre adresse de livraison ?`,
 
-  OUTSIDE_HOURS: `Nous sommes fermés (ouverture 12h). Votre commande sera traitée à l'ouverture.`,
+  OUTSIDE_HOURS: `Nous sommes actuellement fermés (ouverture 12h). Vous pouvez passer votre commande maintenant et elle sera traitée dès l'ouverture.`,
 
   CONFIRMED_DELIVERY: `Commande confirmée. Le livreur vous appellera dans 30 minutes.`,
 
@@ -161,15 +161,6 @@ async function handleCustomerMessage(phone, text) {
   }
 
   const session = await getActiveSession(phone)
-
-  // Outside business hours (12h–22h WAT = UTC+1)
-  if (isOutsideHours()) {
-    if (!session || !PENDING_ORDER_STATES.has(session.state)) {
-      await sendWhatsAppMessage(phone, MSG.OUTSIDE_HOURS)
-      if (!session) await createSession(phone, null)
-      return
-    }
-  }
 
   // "changer / recommencer / autre agence" → reset branch at any time
   if (RE_CHANGE_BRANCH.test(trimmed)) {
@@ -287,6 +278,9 @@ async function handleBrowsing(phone, session, text, trimmed) {
 
   // Detect order intent → extract structured JSON with Claude Haiku
   if (RE_ORDER_KEYWORDS.test(text)) {
+    if (isOutsideHours()) {
+      await sendWhatsAppMessage(phone, MSG.OUTSIDE_HOURS)
+    }
     const extracted = await extractOrderWithClaude(session.ville, updatedMessages)
 
     if (extracted && extracted.items && extracted.items.length > 0) {
