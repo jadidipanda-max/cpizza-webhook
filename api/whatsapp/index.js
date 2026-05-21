@@ -61,17 +61,15 @@ const STATE = {
   BRANCH_CHANGE_PENDING:        'BRANCH_CHANGE_PENDING',
 }
 
-// Terminal states that should not receive further messages
 const TERMINAL_STATES = new Set([STATE.CONFIRMED, STATE.QUALITY_FOLLOWUP])
 
-// States where the customer is actively waiting — no outside-hours block
 const PENDING_ORDER_STATES = new Set([
   STATE.WAITING_PAYMENT,
   STATE.WAITING_MANAGER_CONFIRMATION,
   STATE.WAITING_DELIVERY_PRICE,
 ])
 
-// ─── Hardcoded messages (Claude never generates these) ───────────────────────
+// ─── Hardcoded messages ───────────────────────────────────────────────────────
 
 const MSG = {
   CHOOSE_BRANCH: `Bonjour ! Choisissez votre point de vente :
@@ -80,7 +78,7 @@ const MSG = {
 3. Odza (Yaoundé)
 4. Bonamoussadi (Douala)`,
 
-  CHOOSE_DELIVERY_MODE: `Comment souhaitez-vous récupérer votre commande ?
+  CHOOSE_DELIVERY_MODE: `Comment récupérez-vous votre commande ?
 1. Livraison
 2. À emporter`,
 
@@ -97,14 +95,74 @@ const MSG = {
   PAYMENT_REJECTED: `Paiement non reçu. Vérifiez et renvoyez votre capture d'écran.`,
 }
 
-// ─── Detection regexes ───────────────────────────────────────────────────────
+// ─── Menu catalog (ordered longest-name-first to avoid substring conflicts) ──
+
+const MENU_ITEMS = [
+  // Poulet avec taille (must come before standalone "poulet")
+  { names: ['poulet entier', 'poulet complet'],                        displayName: 'Poulet Entier',          type: 'food',   price: 9000 },
+  { names: ['demi poulet', 'demi-poulet', '1/2 poulet', 'moitie poulet', 'moitié poulet'], displayName: '1/2 Poulet', type: 'food', price: 5000 },
+  { names: ['quart de poulet', 'quart poulet', '1/4 poulet'],          displayName: '1/4 Poulet',             type: 'food',   price: 3000 },
+  // Chawarma (long names first)
+  { names: ['chawarma poulet', 'chawarma au poulet'],                  displayName: 'Chawarma Poulet',        type: 'food',   price: 2500 },
+  { names: ['chawarma viande', 'chawarma boeuf', 'chawarma'],         displayName: 'Chawarma',               type: 'food',   price: 2000 },
+  // Burgers (long names first)
+  { names: ['double cheese burger', 'burger double cheese', 'double cheese'], displayName: 'Burger Double Cheese', type: 'food', price: 2500 },
+  { names: ['cheese burger', 'burger cheese'],                         displayName: 'Burger Cheese',          type: 'food',   price: 2000 },
+  { names: ['burger classic', 'burger classique', 'burger'],           displayName: 'Burger',                 type: 'food',   price: 1500 },
+  // Riz (long names first)
+  { names: ['riz crevettes', 'riz aux crevettes', 'riz frit crevettes'], displayName: 'Riz Frit Crevettes', type: 'food',   price: 3000 },
+  { names: ['riz poulet', 'riz au poulet', 'riz frit poulet'],         displayName: 'Riz Frit Poulet',        type: 'food',   price: 2000 },
+  { names: ['riz boeuf', 'riz au boeuf', 'riz frit boeuf', 'riz frit', 'riz'], displayName: 'Riz Frit Boeuf', type: 'food', price: 1500 },
+  // Frites (long names first)
+  { names: ['frites pomme', 'frites de pomme', 'frites pommes de terre', 'pommes frites'], displayName: 'Frites Pomme de Terre', type: 'food', price: 1000 },
+  { names: ['frites plantain', 'frites de plantain', 'frites'],        displayName: 'Frites Plantain',        type: 'food',   price: 500 },
+  // Formulas (Plan E before Plan A to avoid false match on "plan")
+  { names: ['plan e'],  displayName: 'Formule Plan E',  type: 'formula', price: 10000 },
+  { names: ['plan d'],  displayName: 'Formule Plan D',  type: 'formula', price: 9000 },
+  { names: ['plan c'],  displayName: 'Formule Plan C',  type: 'formula', price: 8000 },
+  { names: ['plan b'],  displayName: 'Formule Plan B',  type: 'formula', price: 7000 },
+  { names: ['plan a'],  displayName: 'Formule Plan A',  type: 'formula', price: 6000 },
+  // Pizzas — Les Uniques
+  { names: ['manipena'],                                               displayName: 'Manipena',               type: 'pizza',  prices: { M: 5000, XL: 8000, XXL: 9500 } },
+  { names: ['sarabande'],                                              displayName: 'Sarabande',              type: 'pizza',  prices: { M: 5000, XL: 8000, XXL: 9500 } },
+  // Pizzas — Les Généreuses
+  { names: ['delicia', 'delicia', 'delicia'],                          displayName: 'Delicia',                type: 'pizza',  prices: { M: 5000, XL: 8000, XXL: 9500 } },
+  { names: ['speciale', 'spéciale', 'speciale'],                       displayName: 'Speciale',               type: 'pizza',  prices: { M: 5000, XL: 8000, XXL: 9000 } },
+  { names: ['americaine', 'américaine'],                               displayName: 'Americaine',             type: 'pizza',  prices: { M: 5000, XL: 8000, XXL: 9000 } },
+  { names: ['7eme ciel', '7ème ciel', '7ieme ciel', '7 eme ciel', '7eme'],  displayName: '7eme Ciel',      type: 'pizza',  prices: { M: 4500, XL: 7500, XXL: 8500 } },
+  { names: ['celia'],                                                  displayName: 'Celia',                  type: 'pizza',  prices: { M: 4500, XL: 7500, XXL: 8500 } },
+  // Pizzas — Les Originales
+  { names: ['calypso'],                                                displayName: 'Calypso',                type: 'pizza',  prices: { M: 4500, XL: 7500, XXL: 8500 } },
+  { names: ['adagio'],                                                 displayName: 'Adagio',                 type: 'pizza',  prices: { M: 4500, XL: 7000, XXL: 8500 } },
+  // Pizzas — Les Gourmandes
+  { names: ['pizza poulet', 'poulet pizza'],                           displayName: 'Poulet (pizza)',         type: 'pizza',  prices: { M: 4500, XL: 7500, XXL: 8500 } },
+  { names: ['caliente'],                                               displayName: 'Caliente',               type: 'pizza',  prices: { M: 4500, XL: 7500, XXL: 8500 } },
+  { names: ['vosgienne'],                                              displayName: 'Vosgienne',              type: 'pizza',  prices: { M: 4500, XL: 7500, XXL: 8500 } },
+  { names: ['mexicaine'],                                              displayName: 'Mexicaine',              type: 'pizza',  prices: { M: 4500, XL: 7500, XXL: 8500 } },
+  { names: ['piano'],                                                  displayName: 'Piano',                  type: 'pizza',  prices: { M: 4500, XL: 7500, XXL: 8500 } },
+  { names: ['salsa'],                                                  displayName: 'Salsa',                  type: 'pizza',  prices: { M: 4500, XL: 7500, XXL: 8500 } },
+  // Pizzas — Les Bons Plans
+  { names: ['mazurka'],                                                displayName: 'Mazurka',                type: 'pizza',  prices: { M: 4000, XL: 6000, XXL: 7000 } },
+  { names: ['margherita'],                                             displayName: 'Margherita',             type: 'pizza',  prices: { M: 2500, XL: 5000, XXL: 6000 } },
+  { names: ['azur'],                                                   displayName: 'Azur',                   type: 'pizza',  prices: { M: 4000, XL: 6500, XXL: 7500 } },
+  // Pizzas — Les Classiques
+  { names: ['vegetarienne', 'végétarienne', 'veggie'],                 displayName: 'Vegetarienne',           type: 'pizza',  prices: { M: 4000, XL: 6500, XXL: 7500 } },
+  { names: ['hawaienne', 'hawaïenne', 'hawaiienne', 'hawai'],          displayName: 'Hawaienne',              type: 'pizza',  prices: { M: 4000, XL: 6500, XXL: 7500 } },
+  { names: ['andante'],                                                displayName: 'Andante',                type: 'pizza',  prices: { M: 4000, XL: 6500, XXL: 7500 } },
+  { names: ['bolognaise'],                                             displayName: 'Bolognaise',             type: 'pizza',  prices: { M: 4000, XL: 6500, XXL: 7500 } },
+  { names: ['regina'],                                                 displayName: 'Regina',                 type: 'pizza',  prices: { M: 4000, XL: 6500, XXL: 7500 } },
+  // Standalone "poulet" → pizza Poulet by default
+  { names: ['poulet'],                                                 displayName: 'Poulet (pizza)',         type: 'pizza',  prices: { M: 4500, XL: 7500, XXL: 8500 } },
+]
+
+// ─── Regex helpers ────────────────────────────────────────────────────────────
 
 const RE_CHANGE_BRANCH  = /\b(changer|recommencer|autre agence|changer agence|changer de agence)\b/i
 const RE_MENU_REQUEST   = /\b(menu|carte)\b/i
 const RE_STATUS         = /^statut$/i
-const RE_ORDER_KEYWORDS = /\b(commander|commande|je veux|je voudrais|je prends|j'aimerais|j'ai besoin|prendre|ajouter|livrer)\b|\b\d+\s*x?\s*(pizza|poulet|burger|chawarma|sandwich|salade|boisson|coca|fanta|malta|jus)\b/i
+const RE_CONFIRMATION   = /\b(juste ca|c'est tout|c est tout|oui|non juste ca|que ca|rien d'autre|c'est bon|c est bon|that's all|just that)\b/i
 
-// ─── Main HTTP handler ───────────────────────────────────────────────────────
+// ─── Main HTTP handler ────────────────────────────────────────────────────────
 
 module.exports = async function handler(req, res) {
   if (req.method === 'GET') {
@@ -148,12 +206,11 @@ module.exports = async function handler(req, res) {
   }
 }
 
-// ─── Customer message dispatcher ─────────────────────────────────────────────
+// ─── Customer message dispatcher ──────────────────────────────────────────────
 
 async function handleCustomerMessage(phone, text) {
   const trimmed = text.trim()
 
-  // "statut" → describe current state, always respond
   if (RE_STATUS.test(trimmed)) {
     const session = await getActiveSession(phone)
     await sendWhatsAppMessage(phone, describeState(session))
@@ -162,16 +219,13 @@ async function handleCustomerMessage(phone, text) {
 
   const session = await getActiveSession(phone)
 
-  // "changer / recommencer / autre agence" → reset branch at any time
   if (RE_CHANGE_BRANCH.test(trimmed)) {
     await handleBranchChange(phone, session)
     return
   }
 
-  // Ensure session exists
   const s = session || await createSession(phone, null)
 
-  // Detect and persist language on first message
   if (!s.language) {
     const lang = detectLanguage(text)
     await updateSession(s.id, { language: lang })
@@ -266,6 +320,8 @@ async function handleRestoringOrder(phone, session, trimmed) {
   }
 }
 
+// ─── BROWSING handler — Claude only for menu questions, never for ordering ────
+
 async function handleBrowsing(phone, session, text, trimmed) {
   // Menu request → send images, no Claude
   if (RE_MENU_REQUEST.test(text)) {
@@ -274,48 +330,35 @@ async function handleBrowsing(phone, session, text, trimmed) {
     return
   }
 
-  const updatedMessages = [...(session.messages || []), { role: 'user', content: text }]
-
-  // Detect order intent → extract structured JSON with Claude Haiku
-  if (RE_ORDER_KEYWORDS.test(text)) {
+  // Detect order intent with pure code (no Claude)
+  if (detectOrderIntent(text)) {
     if (isOutsideHours()) {
       await sendWhatsAppMessage(phone, MSG.OUTSIDE_HOURS)
     }
-    const extracted = await extractOrderWithClaude(session.ville, updatedMessages)
 
-    if (extracted && extracted.items && extracted.items.length > 0) {
-      // Check if any pizza is missing size → ask via Claude Q&A
-      const missingSize = extracted.items.some(i => !i.size && isPizzaName(i.name))
-      if (missingSize) {
-        const reply = await claudeMenuAnswer(session.ville, updatedMessages)
-        await updateSession(session.id, {
-          messages: [...updatedMessages, { role: 'assistant', content: reply }],
-        })
-        await sendWhatsAppMessage(phone, reply)
-        return
-      }
+    const extracted = extractOrderFromText(text)
 
+    if (extracted.items.length > 0) {
       const orderSummary = {
         ville:          session.ville,
-        articles:       extracted.items.map(i => ({ nom: i.name, qty: i.qty, prix: i.price, taille: i.size })),
+        articles:       extracted.items.map(i => ({ nom: i.name, qty: i.qty, prix: i.price, taille: i.size || null })),
         total_articles: extracted.total,
         total_final:    extracted.total,
       }
 
       await updateSession(session.id, {
         state:         STATE.CHOOSING_DELIVERY_MODE,
-        messages:      updatedMessages,
         order_summary: orderSummary,
       })
 
-      const recap = formatOrderRecap(extracted.items, extracted.total)
-      await sendWhatsAppMessage(phone, recap)
-      await sendWhatsAppMessage(phone, MSG.CHOOSE_DELIVERY_MODE)
+      const confirmation = formatOrderConfirmation(extracted.items, extracted.total)
+      await sendWhatsAppMessage(phone, confirmation)
       return
     }
   }
 
-  // Default: Claude answers the menu question
+  // Not an order → Claude answers the menu question
+  const updatedMessages = [...(session.messages || []), { role: 'user', content: text }]
   const reply = await claudeMenuAnswer(session.ville, updatedMessages)
   await updateSession(session.id, {
     messages: [...updatedMessages, { role: 'assistant', content: reply }],
@@ -353,12 +396,12 @@ async function handleWaitingAddress(phone, session, address) {
   if (managerPhone && order) {
     const items = formatItemsForManager(order.articles)
     await sendWhatsAppMessage(managerPhone,
-      `🛒 Nouvelle commande — ${ville}\n` +
-      `👤 Client : +${phone}\n` +
-      `📦 Articles :\n${items}\n` +
-      `💰 Sous-total : ${order.total_articles} FCFA\n` +
-      `📍 Adresse : ${address}\n\n` +
-      `❓ Quel est le prix de livraison ? Répondez avec le montant total (articles + livraison).`)
+      `Nouvelle commande — ${ville}\n` +
+      `Client : +${phone}\n` +
+      `Articles :\n${items}\n` +
+      `Sous-total : ${order.total_articles} FCFA\n` +
+      `Adresse : ${address}\n\n` +
+      `Quel est le prix de livraison ? Répondez avec le montant total (articles + livraison).`)
   }
 
   await sendWhatsAppMessage(phone, 'Commande transmise. Nous revenons avec le prix de livraison bientôt.')
@@ -377,11 +420,11 @@ async function handlePickup(phone, session) {
   if (managerPhone && order) {
     const items = formatItemsForManager(order.articles)
     await sendWhatsAppMessage(managerPhone,
-      `🛒 Nouvelle commande — ${ville}\n` +
-      `👤 Client : +${phone}\n` +
-      `📦 Articles :\n${items}\n` +
-      `💰 Total : ${order.total_articles} FCFA\n\n` +
-      `🏃 COMMANDE À EMPORTER\n✅ Confirmée via l'agent IA`)
+      `Nouvelle commande — ${ville}\n` +
+      `Client : +${phone}\n` +
+      `Articles :\n${items}\n` +
+      `Total : ${order.total_articles} FCFA\n\n` +
+      `COMMANDE A EMPORTER\nConfirmée via le système`)
   }
 
   await sendWhatsAppMessage(phone, formatPaymentMessage(ville, order, 0, 'pickup'))
@@ -389,11 +432,11 @@ async function handlePickup(phone, session) {
 
 async function handleQualityResponse(phone, session, trimmed) {
   const responses = {
-    '1': 'Merci ! Votre satisfaction est notre priorité. À très bientôt chez C Pizza ! 🍕',
-    '2': 'Merci ! Nous ferons encore mieux la prochaine fois. À bientôt !',
-    '3': "Merci pour votre honnêteté. Nous prenons note et allons améliorer.",
+    '1': 'Merci ! Votre satisfaction est notre priorité. A très bientôt chez C Pizza !',
+    '2': 'Merci ! Nous ferons encore mieux la prochaine fois. A bientôt !',
+    '3': 'Merci pour votre honnêteté. Nous prenons note et allons améliorer.',
   }
-  const reply = responses[trimmed] || 'Merci pour votre retour ! À très bientôt chez C Pizza.'
+  const reply = responses[trimmed] || 'Merci pour votre retour ! A très bientôt chez C Pizza.'
   await sendWhatsAppMessage(phone, reply)
 }
 
@@ -407,13 +450,13 @@ async function handleBranchChange(phone, session) {
   const pendingItems = session.order_summary?.articles || null
 
   await updateSession(session.id, {
-    state:         STATE.BRANCH_CHANGE_PENDING,
-    ville:         null,
-    delivery_mode: null,
+    state:            STATE.BRANCH_CHANGE_PENDING,
+    ville:            null,
+    delivery_mode:    null,
     delivery_address: null,
-    delivery_price: null,
-    order_summary: pendingItems ? { pending_items: pendingItems } : null,
-    messages:      pendingItems ? (session.messages || []) : [],
+    delivery_price:   null,
+    order_summary:    pendingItems ? { pending_items: pendingItems } : null,
+    messages:         pendingItems ? (session.messages || []) : [],
   })
 
   await sendWhatsAppMessage(phone, `D'accord !\n\n${MSG.CHOOSE_BRANCH}`)
@@ -425,7 +468,6 @@ async function handleManagerMessage(managerPhone, branch, text) {
   const norm = text.trim().toUpperCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
 
-  // Case 1: manager is replying with delivery price (WAITING_DELIVERY_PRICE)
   const { data: deliverySessions } = await supabase
     .from('sessions')
     .select('*')
@@ -454,7 +496,6 @@ async function handleManagerMessage(managerPhone, branch, text) {
     }
   }
 
-  // Case 2: manager confirms or rejects payment (WAITING_MANAGER_CONFIRMATION)
   const { data: confirmSessions } = await supabase
     .from('sessions')
     .select('*')
@@ -515,118 +556,108 @@ async function handlePaymentImage(phone, mediaId) {
 
   await sendWhatsAppImage(managerPhone, mediaId)
   await sendWhatsAppMessage(managerPhone,
-    `💳 Preuve de paiement reçue — ${session.ville}\n` +
-    `👤 Client : +${phone}\n` +
-    `📦 Commande :\n${items}\n` +
-    `💰 Total : ${order?.total_final || order?.total_articles || 0} FCFA\n` +
-    `🚚 Mode : ${session.delivery_mode === 'pickup' ? 'À emporter' : 'Livraison'}\n\n` +
+    `Preuve de paiement recue — ${session.ville}\n` +
+    `Client : +${phone}\n` +
+    `Commande :\n${items}\n` +
+    `Total : ${order?.total_final || order?.total_articles || 0} FCFA\n` +
+    `Mode : ${session.delivery_mode === 'pickup' ? 'A emporter' : 'Livraison'}\n\n` +
     `Confirmez-vous la réception ? Répondez OUI ou NON`)
 
   await sendWhatsAppMessage(phone, MSG.PAYMENT_RECEIVED)
 }
 
-// ─── Claude helpers (BROWSING and ORDERING only) ──────────────────────────────
+// ─── Claude helper — menu Q&A only, never ordering ───────────────────────────
 
 async function claudeMenuAnswer(ville, messages) {
   const resp = await anthropic.messages.create({
-    model:      'claude-sonnet-4-6',
-    max_tokens: 512,
-    system:     getMenuSystemPrompt(ville),
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 300,
+    system:     `Tu réponds aux questions sur le menu C Pizza ${ville}. Tu décris les pizzas et suggères des plats. Tu ne prends pas de commande dans tes réponses — le système le fait automatiquement quand le client mentionne un plat. N'utilise jamais d'astérisques. Maximum 3 lignes par réponse.`,
     messages,
   })
   return resp.content[0].text
 }
 
-async function extractOrderWithClaude(ville, messages) {
-  const system = `Tu es un extracteur de commandes pour C Pizza ${ville}.
-Analyse cette conversation et retourne UNIQUEMENT du JSON valide, sans texte supplémentaire.
+// ─── Pure-code order detection (no Claude) ────────────────────────────────────
 
-Format:
-{"items": [{"name": "Nom de l'article", "size": "XL", "qty": 1, "price": 6500}], "total": 6500}
-
-Règles:
-- Sizes valides pour pizzas: M, XL, XXL uniquement. Si non précisée, mets null.
-- Prix selon le menu C Pizza (M=4000, XL=6500, XXL=7500 pour pizzas classiques).
-- Si aucune commande claire, retourne: {"items": [], "total": 0}
-- Ne retourne que du JSON, aucun autre texte.`
-
-  const resp = await anthropic.messages.create({
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 512,
-    system,
-    messages:   messages.slice(-8),
-  })
-
-  try {
-    const raw  = resp.content[0].text.trim()
-    const match = raw.match(/\{[\s\S]*\}/)
-    return match ? JSON.parse(match[0]) : null
-  } catch {
-    return null
-  }
+function stripAccents(str) {
+  return str.normalize('NFD').replace(/[̀-ͯ]/g, '')
 }
 
-function getMenuSystemPrompt(ville) {
-  return `Tu es l'assistant menu de C Pizza, agence ${ville}.
-Ton rôle : répondre aux questions sur le menu, décrire les pizzas, suggérer des articles.
-Tu ne prends PAS les commandes toi-même et tu ne rediriges JAMAIS vers les agences.
-Messages courts (3–4 lignes max), 1–2 emojis max.
-Réponds en français (ou anglais si le client écrit en anglais).
-Tailles disponibles : M, XL, XXL uniquement.
+function detectOrderIntent(text) {
+  const normalized = stripAccents(text.toLowerCase())
 
-MENU C PIZZA :
+  for (const item of MENU_ITEMS) {
+    for (const name of item.names) {
+      if (normalized.includes(stripAccents(name))) return true
+    }
+  }
 
-PIZZAS — LES CLASSIQUES
-Regina (fromage, tomate, champignons, jambon, basilic) : M 4000 / XL 6500 / XXL 7500
-Bolognaise (fromage, tomate, olive, boeuf, carotte) : M 4000 / XL 6500 / XXL 7500
-Hawaiienne (fromage, jambon, crème, ananas) : M 4000 / XL 6500 / XXL 7500
-Andante (fromage, tomate, jambon, olive, ail, champignons) : M 4000 / XL 6500 / XXL 7500
-Végétarienne (fromage, tomate, crème, olive, poivrons, champignons) : M 4000 / XL 6500 / XXL 7500
+  // Confirmation words trigger if present (customer finalizing their pick)
+  if (RE_CONFIRMATION.test(normalized)) return true
 
-PIZZAS — LES BONS PLANS
-Azur (fromage, tomate, basilic, saucisson) : M 4000 / XL 6500 / XXL 7500
-Mazurka (fromage, tomate, poivrons, boeuf, oignon) : M 4000 / XL 6000 / XXL 7000
-Margherita (fromage, tomate, basilic) : M 2500 / XL 5000 / XXL 6000
+  return false
+}
 
-PIZZAS — LES GOURMANDES
-Caliente (fromage, tomate, champignons, poivrons, poulet, pomme de terre) : M 4500 / XL 7500 / XXL 8500
-Poulet (fromage, tomate, champignons, crème, poulet, oignon) : M 4500 / XL 7500 / XXL 8500
-Salsa (fromage, tomate, champignons, jambon, poulet) : M 4500 / XL 7500 / XXL 8500
-Piano (fromage, tomate, poivrons, crème, oignons, lardons) : M 4500 / XL 7500 / XXL 8500
-Vosgienne (fromage, jambon, poivrons, crème, lardons, coriandre) : M 4500 / XL 7500 / XXL 8500
-Mexicaine (fromage, tomate, poivrons, boeuf, oignons, maïs) : M 4500 / XL 7500 / XXL 8500
+function extractOrderFromText(text) {
+  const normalized = stripAccents(text.toLowerCase())
+  const foundItems = []
+  const usedRanges = []
 
-PIZZAS — LES ORIGINALES
-Adagio (fromage, tomate, champignons, jambon, lardons, basilic) : M 4500 / XL 7000 / XXL 8500
-Calypso (fromage, tomate, champignons, jambon, crème, crevette) : M 4500 / XL 7500 / XXL 8500
+  for (const item of MENU_ITEMS) {
+    for (const name of item.names) {
+      const needle = stripAccents(name)
+      const idx    = normalized.indexOf(needle)
+      if (idx === -1) continue
 
-PIZZAS — LES GÉNÉREUSES
-Delicia (fromage, tomate, champignons, jambon, boeuf, poulet, lardons) : M 5000 / XL 8000 / XXL 9500
-Speciale (fromage, tomate, champignons, crème, boeuf, jambon, poulet) : M 5000 / XL 8000 / XXL 9000
-Americaine (fromage, tomate, champignons, jambon, boeuf, salami) : M 5000 / XL 8000 / XXL 9000
-Celia (fromage, tomate, jambon, boeuf, oeuf dur) : M 4500 / XL 7500 / XXL 8500
-7ème Ciel (fromage, tomate, jambon, poulet, boeuf, champignons) : M 4500 / XL 7500 / XXL 8500
+      // Skip if this range overlaps a previously matched range
+      const end = idx + needle.length
+      const overlaps = usedRanges.some(([s, e]) => idx < e && end > s)
+      if (overlaps) continue
 
-PIZZAS — LES UNIQUES
-Manipena (cheddar, mozzarella, tomate, poulet, boeuf, champignons, saucisson) : M 5000 / XL 8000 / XXL 9500
-Sarabande (fromage, tomate, crème, basilic, crevette) : M 5000 / XL 8000 / XXL 9500
+      // Extract quantity — look in a ±15-char window around the match
+      const before  = normalized.slice(Math.max(0, idx - 15), idx)
+      const after   = normalized.slice(end, end + 15)
+      let qty       = 1
+      const qtyBefore = before.match(/(\d+)\s*x?\s*$/)
+      const qtyAfter  = after.match(/^\s*x\s*(\d+)/)
+      if (qtyBefore) qty = parseInt(qtyBefore[1])
+      else if (qtyAfter) qty = parseInt(qtyAfter[1])
 
-POULETS
-1/4 pané ou frit : 3000 | 1/2 : 5000 | Entier : 9000 FCFA
+      // Extract size for pizzas in a ±20-char window
+      let size = null
+      if (item.type === 'pizza') {
+        const ctx = normalized.slice(Math.max(0, idx - 20), end + 20)
+        if (/\bxxl\b/.test(ctx))      size = 'XXL'
+        else if (/\bxl\b/.test(ctx))  size = 'XL'
+        else if (/\bm\b/.test(ctx))   size = 'M'
+        else                           size = 'XL' // default size
+      }
 
-CHAWARMA : Viande 2000 / Poulet 2500 FCFA
+      const price = item.type === 'pizza'
+        ? (item.prices[size] || item.prices.XL)
+        : item.price
 
-BURGERS : Classic 1500 / Cheese 2000 / Double cheese 2500 FCFA
+      foundItems.push({ name: item.displayName, qty, size, price })
+      usedRanges.push([idx, end])
+      break // matched this item, move to next MENU_ITEMS entry
+    }
+  }
 
-BOISSONS : Gazeuse 1L 1000 FCFA | Canette 1000 | Jus naturel 1L 2500 / verre 1000
-Eau 500 | Vin Elrojo 2500 | Tour Canteou blanc 4000 FCFA
-
-EXTRAS : Frites plantain 500 / pomme 1000 | Brochettes porc 3000 | Riz frit boeuf 1500 / poulet 2000 / crevettes 3000
-
-FORMULES MEGA (4 personnes) : Plan A–E : 6000–10000 FCFA`
+  const total = foundItems.reduce((sum, i) => sum + i.price * i.qty, 0)
+  return { items: foundItems, total }
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────
+
+function formatOrderConfirmation(items, total) {
+  const lines = items.map(i => {
+    const sizeStr = i.size ? ` ${i.size}` : ''
+    return `- ${i.qty}x ${i.name}${sizeStr} — ${i.price * i.qty} FCFA`
+  })
+  return `Commande notée :\n${lines.join('\n')}\nTotal : ${total} FCFA\n\n` +
+         `Comment récupérez-vous votre commande ?\n1. Livraison\n2. À emporter`
+}
 
 function formatPaymentMessage(ville, order, deliveryPrice, mode) {
   const payment   = BRANCH_PAYMENT_INFO[ville] || {}
@@ -634,11 +665,11 @@ function formatPaymentMessage(ville, order, deliveryPrice, mode) {
   const total     = foodTotal + deliveryPrice
 
   const items = (order?.articles || [])
-    .map(a => `• ${a.qty}x ${a.nom}${a.taille ? ` (${a.taille})` : ''} — ${(a.prix || 0) * a.qty} FCFA`)
+    .map(a => `- ${a.qty}x ${a.nom}${a.taille ? ` (${a.taille})` : ''} — ${(a.prix || 0) * a.qty} FCFA`)
     .join('\n')
 
-  let payLine = `1. Orange Money → ${payment.om || 'Voir agence'}`
-  if (payment.mtn) payLine += `\n2. MTN MoMo → ${payment.mtn}`
+  let payLine = `1. Orange Money : ${payment.om || 'Voir agence'}`
+  if (payment.mtn) payLine += `\n2. MTN MoMo : ${payment.mtn}`
   payLine += `\n${payment.mtn ? '3' : '2'}. Cash ${mode === 'pickup' ? 'sur place' : 'à la livraison'}`
 
   return `Total à payer : ${total} FCFA\n\n` +
@@ -648,27 +679,21 @@ function formatPaymentMessage(ville, order, deliveryPrice, mode) {
     `Envoyez votre capture d'écran de paiement.`
 }
 
-function formatOrderRecap(items, total) {
-  const lines = items.map(i =>
-    `• ${i.qty}x ${i.name}${i.size ? ` (${i.size})` : ''} — ${(i.price || 0) * i.qty} FCFA`)
-  return `Votre commande :\n${lines.join('\n')}\n\nTotal : ${total} FCFA`
-}
-
 function formatItemsList(articles) {
   if (!articles?.length) return '(aucun article)'
-  return articles.map(a => `• ${a.qty}x ${a.nom}${a.taille ? ` (${a.taille})` : ''}`).join('\n')
+  return articles.map(a => `- ${a.qty}x ${a.nom}${a.taille ? ` (${a.taille})` : ''}`).join('\n')
 }
 
 function formatItemsForManager(articles) {
   if (!articles?.length) return '(aucun article)'
-  return articles.map(a => `  • ${a.qty}x ${a.nom}${a.taille ? ` (${a.taille})` : ''} = ${(a.prix || 0) * a.qty} FCFA`).join('\n')
+  return articles.map(a => `  - ${a.qty}x ${a.nom}${a.taille ? ` (${a.taille})` : ''} = ${(a.prix || 0) * a.qty} FCFA`).join('\n')
 }
 
 function describeState(session) {
   if (!session) return 'Aucune commande en cours. Envoyez un message pour commencer.'
   const labels = {
-    [STATE.CHOOSING_BRANCH]:              'Sélection de l\'agence.',
-    [STATE.BRANCH_CHANGE_PENDING]:        'Changement d\'agence en cours.',
+    [STATE.CHOOSING_BRANCH]:              "Sélection de l'agence.",
+    [STATE.BRANCH_CHANGE_PENDING]:        "Changement d'agence en cours.",
     [STATE.RESTORING_ORDER]:              'Confirmation de commande précédente.',
     [STATE.BROWSING]:                     `Navigation du menu — agence ${session.ville}.`,
     [STATE.CHOOSING_DELIVERY_MODE]:       'Choix du mode de récupération.',
@@ -695,14 +720,12 @@ async function getActiveSession(phone) {
   const s = data?.[0]
   if (!s) return null
 
-  // Migrate old sessions without a state column
   if (!s.state) {
     const state = migrateOldStatus(s.order_status, s.ville)
     await updateSession(s.id, { state })
     s.state = state
   }
 
-  // Do not re-use terminal sessions
   if (TERMINAL_STATES.has(s.state)) return null
 
   return s
@@ -731,16 +754,16 @@ async function updateSession(id, fields) {
 
 function migrateOldStatus(orderStatus, ville) {
   const map = {
-    active:                   ville ? STATE.BROWSING : STATE.CHOOSING_BRANCH,
-    awaiting_delivery_mode:   STATE.CHOOSING_DELIVERY_MODE,
+    active:                    ville ? STATE.BROWSING : STATE.CHOOSING_BRANCH,
+    awaiting_delivery_mode:    STATE.CHOOSING_DELIVERY_MODE,
     awaiting_delivery_address: STATE.WAITING_ADDRESS,
-    awaiting_delivery_price:  STATE.WAITING_DELIVERY_PRICE,
-    awaiting_payment:         STATE.WAITING_PAYMENT,
-    payment_pending_manager:  STATE.WAITING_MANAGER_CONFIRMATION,
-    payment_confirmed:        STATE.CONFIRMED,
-    quality_sent:             STATE.QUALITY_FOLLOWUP,
-    branch_change_pending:    STATE.BRANCH_CHANGE_PENDING,
-    awaiting_order_restore:   STATE.RESTORING_ORDER,
+    awaiting_delivery_price:   STATE.WAITING_DELIVERY_PRICE,
+    awaiting_payment:          STATE.WAITING_PAYMENT,
+    payment_pending_manager:   STATE.WAITING_MANAGER_CONFIRMATION,
+    payment_confirmed:         STATE.CONFIRMED,
+    quality_sent:              STATE.QUALITY_FOLLOWUP,
+    branch_change_pending:     STATE.BRANCH_CHANGE_PENDING,
+    awaiting_order_restore:    STATE.RESTORING_ORDER,
   }
   return map[orderStatus] || STATE.CHOOSING_BRANCH
 }
@@ -799,17 +822,6 @@ function isOutsideHours() {
 function detectLanguage(text) {
   return /\b(hello|hi|please|thank|order|want|menu|delivery|pizza|i would|i want|can i)\b/i.test(text)
     ? 'en' : 'fr'
-}
-
-function isPizzaName(name) {
-  if (!name) return false
-  const pizzaNames = [
-    'regina', 'bolognaise', 'hawaiienne', 'andante', 'vegetarienne', 'azur',
-    'mazurka', 'margherita', 'caliente', 'poulet', 'salsa', 'piano', 'vosgienne',
-    'mexicaine', 'adagio', 'calypso', 'delicia', 'speciale', 'americaine',
-    'celia', '7eme ciel', 'manipena', 'sarabande',
-  ]
-  return pizzaNames.some(p => name.toLowerCase().includes(p))
 }
 
 // ─── WhatsApp API helpers ─────────────────────────────────────────────────────
