@@ -274,8 +274,10 @@ async function handleCustomerMessage(phone, text) {
   const state = s.state || STATE.CHOOSING_BRANCH
 
   // ── J1 — Charabia (moins de 3 lettres valides) ────────────────────────────
+  // Exclure CHOOSING_BRANCH et BRANCH_CHANGE_PENDING : "1"/"2"/"3"/"4" sont valides
   const validLetters = trimmed.replace(/[^a-zA-ZÀ-ÿ]/g, '')
-  if (trimmed.length > 0 && validLetters.length < 3) {
+  if (trimmed.length > 0 && validLetters.length < 3 &&
+      state !== STATE.CHOOSING_BRANCH && state !== STATE.BRANCH_CHANGE_PENDING) {
     await sendWhatsAppMessage(phone, "Je n'ai pas compris. Tapez *menu* ou dites-moi votre commande.")
     return
   }
@@ -443,7 +445,7 @@ async function handleChoosingBranch(phone, session, trimmed) {
     await sendWhatsAppMessage(phone,
       `Vous aviez commandé :\n${itemsText}\nGarder cette commande ?\n1. Oui  2. Non`)
   } else {
-    await sendWhatsAppMessage(phone, `Bienvenue à C Pizza ${branch} ! Comment puis-je vous aider ?`)
+    await sendWhatsAppMessage(phone, "Bienvenue chez C Pizza ! Comment puis-je vous aider ?")
   }
 }
 
