@@ -60,6 +60,7 @@ const STATE = {
   CONFIRMED:                    'CONFIRMED',
   QUALITY_FOLLOWUP:             'QUALITY_FOLLOWUP',
   BRANCH_CHANGE_PENDING:        'BRANCH_CHANGE_PENDING',
+  CONFIRMING_ORDER:             'CONFIRMING_ORDER',
 }
 
 const TERMINAL_STATES = new Set([STATE.CONFIRMED, STATE.QUALITY_FOLLOWUP])
@@ -182,7 +183,7 @@ module.exports = async function handler(req, res) {
     const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]
     if (!message) return res.status(200).json({ status: 'ignored' })
 
-    const senderPhone   = message.from
+    const senderPhone  = message.from
     const managerBranch = getManagerBranch(senderPhone)
 
     if ((managerBranch || senderPhone === OWNER_PHONE) && message.type === 'text') {
@@ -190,7 +191,44 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ status: 'ok' })
     }
 
+    // E1 — Audio message
+    if (message.type === 'audio') {
+      await sendWhatsAppMessage(senderPhone, "Nous ne traitons pas les messages vocaux. Écrivez votre commande par message texte.")
+      return res.status(200).json({ status: 'ok' })
+    }
+
+    // E4 — Sticker
+    if (message.type === 'sticker') {
+      await sendWhatsAppMessage(senderPhone, "Bonjour ! Comment puis-je vous aider ?")
+      return res.status(200).json({ status: 'ok' })
+    }
+
+    // E5 — Video or document
+    if (message.type === 'video' || message.type === 'document') {
+      await sendWhatsAppMessage(senderPhone, "Envoyez uniquement du texte ou une capture de paiement.")
+      return res.status(200).json({ status: 'ok' })
+    }
+
+    // E2 — Location message
+    if (message.type === 'location') {
+      const loc = message.location
+      const sessionForLoc = await getActiveSession(senderPhone)
+      if (sessionForLoc?.state === STATE.WAITING_ADDRESS) {
+        const locAddress = `GPS: ${loc.latitude}, ${loc.longitude}${loc.name ? ` (${loc.name})` : ''}`
+        await handleWaitingAddress(senderPhone, sessionForLoc, locAddress)
+      } else {
+        await sendWhatsAppMessage(senderPhone, "Envoyez votre adresse par message texte.")
+      }
+      return res.status(200).json({ status: 'ok' })
+    }
+
+    // E3 — Image: only forward to payment handler if in WAITING_PAYMENT
     if (message.type === 'image') {
+      const sessionForImg = await getActiveSession(senderPhone)
+      if (sessionForImg?.state !== STATE.WAITING_PAYMENT) {
+        await sendWhatsAppMessage(senderPhone, "Envoyez uniquement votre capture de paiement pour finaliser votre commande.")
+        return res.status(200).json({ status: 'ok' })
+      }
       await handlePaymentImage(senderPhone, message.image.id)
       return res.status(200).json({ status: 'ok' })
     }
@@ -235,6 +273,94 @@ async function handleCustomerMessage(phone, text) {
 
   const state = s.state || STATE.CHOOSING_BRANCH
 
+  // ── J1 — Charabia (moins de 3 lettres valides) ────────────────────────────
+  const validLetters = trimmed.replace(/[^a-zA-ZÀ-ÿ]/g, '')
+  if (trimmed.length > 0 && validLetters.length < 3) {
+    await sendWhatsAppMessage(phone, "Je n'ai pas compris. Tapez *menu* ou dites-moi votre commande.")
+    return
+  }
+
+  // ── Annulation à tout moment ──────────────────────────────────────────────
+  if (/\b(annuler|je veux annuler|cancel|stop)\b/i.test(trimmed) &&
+      state !== STATE.CHOOSING_BRANCH && state !== STATE.BROWSING) {
+    const mgrAnn = MANAGER_MAP[s.ville]
+    const orderDesc = s.order_summary?.articles ? formatItemsList(s.order_summary.articles) : 'Aucun article'
+    if (mgrAnn) await sendWhatsAppMessage(mgrAnn, `ANNULATION — Client : +${phone} — Commande : ${orderDesc}`)
+    await updateSession(s.id, { state: STATE.BROWSING, order_summary: null })
+    await sendWhatsAppMessage(phone, "Demande d'annulation transmise. Revenez quand vous voulez !")
+    return
+  }
+
+  // ── Réclamation mauvaise commande ─────────────────────────────────────────
+  if (/mauvaise commande|pas ce que j'ai command|erreur commande|ce n'est pas ma commande/i.test(trimmed)) {
+    const mgrRec = MANAGER_MAP[s.ville]
+    if (mgrRec) await sendWhatsAppMessage(mgrRec, `RÉCLAMATION — Client : +${phone} — ${s.ville || ''} — mauvaise commande reçue`)
+    await sendWhatsAppMessage(phone, "Nous nous excusons. Votre réclamation a été transmise et notre équipe va corriger ça.")
+    return
+  }
+
+  // ── I1 — Suivi commande ────────────────────────────────────────────────────
+  if (/\b(où en est|ma commande|où est ma commande|suivi commande)\b/i.test(trimmed)) {
+    const mgrI1 = MANAGER_MAP[s.ville]
+    if (mgrI1) await sendWhatsAppMessage(mgrI1, `SUIVI — Client : +${phone} attend update`)
+    await sendWhatsAppMessage(phone, describeState(s))
+    return
+  }
+
+  // ── I2 — Retard ───────────────────────────────────────────────────────────
+  if (/\b(trop long|longtemps|j'attends toujours|c'est long|trop de temps)\b/i.test(trimmed)) {
+    const mgrI2 = MANAGER_MAP[s.ville]
+    if (mgrI2) await sendWhatsAppMessage(mgrI2, `URGENT RETARD — Client : +${phone} — ${s.ville || ''}`)
+    await sendWhatsAppMessage(phone, "Nous nous excusons pour l'attente. Votre commande arrive bientôt.")
+    return
+  }
+
+  // ── I3 — Non livré ────────────────────────────────────────────────────────
+  if (/\b(pas reçu|toujours pas livré|où est mon livreur|pas livré|pas encore livré)\b/i.test(trimmed)) {
+    const mgrI3 = MANAGER_MAP[s.ville]
+    if (mgrI3) await sendWhatsAppMessage(mgrI3, `URGENT NON LIVRÉ — Client : +${phone} — ${s.ville || ''}`)
+    await sendWhatsAppMessage(phone, "Nous contactons votre livreur immédiatement.")
+    return
+  }
+
+  // ── I4 — Réclamation qualité ──────────────────────────────────────────────
+  if (/\b(froide|pas bonne|mauvaise qualité|pizza froide|était froid)\b/i.test(trimmed)) {
+    const mgrI4 = MANAGER_MAP[s.ville]
+    if (mgrI4) await sendWhatsAppMessage(mgrI4, `RÉCLAMATION QUALITÉ — Client : +${phone} — ${trimmed}`)
+    await sendWhatsAppMessage(phone, "Nous nous excusons sincèrement. Votre retour a été transmis à notre équipe.")
+    return
+  }
+
+  // ── I5 — Félicitations ────────────────────────────────────────────────────
+  if (/\b(excellent|délicieux|très bon|j'ai adoré|c'était délicieux|super bon)\b/i.test(trimmed)) {
+    const mapsLinkI5 = BRANCH_MAPS[s.ville] || 'https://maps.google.com/?q=CPizza+Cameroun'
+    await sendWhatsAppMessage(phone, `Merci ! C'est un plaisir. Laissez-nous un avis ici : ${mapsLinkI5}`)
+    return
+  }
+
+  // ── J5 — Même commande / refaire ─────────────────────────────────────────
+  if (/\b(même commande|refaire ma commande|pareil|comme d'habitude|même chose)\b/i.test(trimmed)) {
+    const { data: lastOrders } = await supabase
+      .from('sessions')
+      .select('order_summary')
+      .eq('phone_number', phone)
+      .not('order_summary', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(5)
+    const lastWithOrder = lastOrders?.find(o => o.order_summary?.articles?.length > 0)
+    if (lastWithOrder?.order_summary?.articles) {
+      const itemsList = formatItemsList(lastWithOrder.order_summary.articles)
+      await updateSession(s.id, {
+        state:         STATE.CONFIRMING_ORDER,
+        order_summary: lastWithOrder.order_summary,
+      })
+      await sendWhatsAppMessage(phone, `Votre dernière commande :\n${itemsList}\n\nConfirmez-vous cette commande ?\n1. Oui\n2. Non`)
+    } else {
+      await sendWhatsAppMessage(phone, "Aucune commande précédente trouvée. Tapez *menu* pour commander.")
+    }
+    return
+  }
+
   switch (state) {
     case STATE.CHOOSING_BRANCH:
     case STATE.BRANCH_CHANGE_PENDING:
@@ -242,6 +368,9 @@ async function handleCustomerMessage(phone, text) {
 
     case STATE.RESTORING_ORDER:
       return handleRestoringOrder(phone, s, trimmed)
+
+    case STATE.CONFIRMING_ORDER:
+      return handleConfirmingOrder(phone, s, trimmed)
 
     case STATE.BROWSING:
       return handleBrowsing(phone, s, text, trimmed)
@@ -253,6 +382,20 @@ async function handleCustomerMessage(phone, text) {
       return handleWaitingAddress(phone, s, trimmed)
 
     case STATE.WAITING_DELIVERY_PRICE:
+      // ── A3 — Ajouter un item ─────────────────────────────────────────────
+      if (/\b(ajouter|j'aimerais aussi|et aussi|je voudrais aussi|et en plus|rajouter)\b/i.test(trimmed)) {
+        await updateSession(s.id, { state: STATE.BROWSING })
+        await sendWhatsAppMessage(phone, "Bien sûr, que souhaitez-vous ajouter ?")
+        return
+      }
+      // ── B4 — Changer adresse pendant attente prix ─────────────────────────
+      if (/\b(changer adresse|modifier adresse|nouvelle adresse|changer mon adresse)\b/i.test(trimmed)) {
+        const mgrB4 = MANAGER_MAP[s.ville]
+        if (mgrB4) await sendWhatsAppMessage(mgrB4, `CHANGEMENT ADRESSE — Client : +${phone} — Nouvelle demande d'adresse`)
+        await updateSession(s.id, { state: STATE.WAITING_ADDRESS })
+        await sendWhatsAppMessage(phone, "Quelle est votre nouvelle adresse de livraison ?")
+        return
+      }
       await sendWhatsAppMessage(phone, 'Votre commande est en cours de traitement. Nous revenons avec le prix de livraison bientôt.')
       return
 
@@ -321,9 +464,165 @@ async function handleRestoringOrder(phone, session, trimmed) {
   }
 }
 
-// ─── BROWSING handler ─────────────────────────────────────────────────────────
+async function handleConfirmingOrder(phone, session, trimmed) {
+  if (/^(1|oui|yes|confirmer|ok|c'est bon|c est bon)$/i.test(trimmed)) {
+    await updateSession(session.id, { state: STATE.CHOOSING_DELIVERY_MODE })
+    await sendWhatsAppMessage(phone, MSG.CHOOSE_DELIVERY_MODE)
+  } else if (/^(2|non|modifier|changer)$/i.test(trimmed)) {
+    await updateSession(session.id, { state: STATE.BROWSING })
+    await sendWhatsAppMessage(phone, "Dites-moi ce que vous souhaitez modifier.")
+  } else {
+    const items = formatItemsList(session.order_summary?.articles)
+    await sendWhatsAppMessage(phone,
+      `Confirmez-vous votre commande ?\n${items}\n\n1. Oui, confirmer\n2. Non, modifier`)
+  }
+}
+
+// ─── BROWSING handler — Claude only for menu questions, never for ordering ────
 
 async function handleBrowsing(phone, session, text, trimmed) {
+  // ── A2 — Modifier la commande ─────────────────────────────────────────────
+  if (/\b(modifier|changer ma commande|réajuster|je veux changer ma commande)\b/i.test(trimmed) &&
+      session.order_summary?.articles?.length > 0) {
+    await sendWhatsAppMessage(phone, "Dites-moi ce que vous souhaitez modifier.")
+    return
+  }
+
+  // ── A4 — Prix d'un item spécifique ────────────────────────────────────────
+  if (/\b(prix|combien coûte|combien coute|quel est le prix de|c'est combien)\b/i.test(trimmed)) {
+    const lowerText = stripAccents(trimmed.toLowerCase())
+    const priceItem = MENU_ITEMS.find(item => item.names.some(n => lowerText.includes(stripAccents(n))))
+    if (priceItem) {
+      let priceMsg
+      if (priceItem.type === 'pizza') {
+        const sizes = Object.entries(priceItem.prices).map(([sz, p]) => `${sz}: ${p} FCFA`).join(', ')
+        priceMsg = `${priceItem.displayName} : ${sizes}.`
+      } else {
+        priceMsg = `${priceItem.displayName} : ${priceItem.price} FCFA.`
+      }
+      await sendWhatsAppMessage(phone, priceMsg)
+      return
+    }
+  }
+
+  // ── A6 — Recommandation / best-seller ─────────────────────────────────────
+  if (/\b(recommandation|qu'est.?ce que vous conseillez|best.?seller|que conseillez|vous recommandez)\b/i.test(trimmed)) {
+    await sendWhatsAppMessage(phone, "Nos best-sellers : Manipena, 7eme Ciel et Calypso. Tapez *menu* pour voir toutes nos pizzas.")
+    return
+  }
+
+  // ── C3 / J6 — Reçu / facture ──────────────────────────────────────────────
+  if (/\b(re[cç]u|facture|justificatif)\b/i.test(trimmed)) {
+    await sendWhatsAppMessage(phone, "Votre capture de paiement fait office de justificatif.")
+    return
+  }
+
+  // ── C4 — Payer à la livraison / cash livraison ────────────────────────────
+  if (/\b(payer (à|a) la livraison|payer cash livraison|cash (à|a) la livraison|cash livraison)\b/i.test(trimmed)) {
+    await sendWhatsAppMessage(phone, "Le paiement se fait uniquement par Orange Money ou MTN MoMo avant la livraison.")
+    return
+  }
+
+  // ── D1 — Numéro de téléphone ──────────────────────────────────────────────
+  if (/\b(votre num[eé]ro|votre t[eé]l[eé]phone|appeler|donnez.?moi.?le num[eé]ro)\b/i.test(trimmed)) {
+    await sendWhatsAppMessage(phone, "Passez votre commande directement ici, notre équipe s'occupe de tout.")
+    return
+  }
+
+  // ── D2 / J7 — Parler à un humain / responsable ───────────────────────────
+  if (/\b(parler (à|a) quelqu'un|un humain|le responsable|le propri[eé]taire|parler au propri[eé]taire|le patron|le g[eé]rant)\b/i.test(trimmed)) {
+    const mgrD2 = MANAGER_MAP[session.ville]
+    if (mgrD2) await sendWhatsAppMessage(mgrD2, `DEMANDE HUMAIN — Client : +${phone} — ${session.ville}`)
+    await sendWhatsAppMessage(phone, "Notre équipe vous répondra bientôt.")
+    return
+  }
+
+  // ── D4 — Traiteur / événement / commande groupée ──────────────────────────
+  if (/\b(traiteur|[eé]v[eé]nement|commande group[eé]e)\b/i.test(trimmed)) {
+    const mgrD4 = MANAGER_MAP[session.ville]
+    if (mgrD4) await sendWhatsAppMessage(mgrD4, `DEMANDE TRAITEUR — Client : +${phone} — Message : ${trimmed}`)
+    await sendWhatsAppMessage(phone, "Notre équipe vous contactera pour les demandes spéciales.")
+    return
+  }
+
+  // ── F1 — Allergie ─────────────────────────────────────────────────────────
+  if (/\b(allergi|allergique)\b/i.test(trimmed)) {
+    const mgrF1 = MANAGER_MAP[session.ville]
+    if (mgrF1) await sendWhatsAppMessage(mgrF1, `ALLERGIE — Client : +${phone} — ${trimmed}`)
+    await sendWhatsAppMessage(phone, "Information transmise à notre équipe qui en tiendra compte.")
+    return
+  }
+
+  // ── F2 — Personnalisation (sans ingrédient / avec plus de) ───────────────
+  if (/\bsans (fromage|piment|oignon|champignon|anchois|olive|poivron|viande|poulet|tomate|jambon|crevette|thon|cr[eè]me|boeuf)\b|\bavec plus de [a-zA-ZÀ-ÿ]+/i.test(trimmed)) {
+    const mgrF2 = MANAGER_MAP[session.ville]
+    if (mgrF2) await sendWhatsAppMessage(mgrF2, `PERSONNALISATION — Client : +${phone} — ${trimmed}`)
+    await sendWhatsAppMessage(phone, "Préférence notée et transmise à notre équipe.")
+    return
+  }
+
+  // ── F3 — Heure souhaitée ──────────────────────────────────────────────────
+  if (/\b(pour \d+h|[àa] \d+h|dans \d+ heure|livrer [àa] \d|pour ce soir [àa])\b/i.test(trimmed)) {
+    const mgrF3 = MANAGER_MAP[session.ville]
+    if (mgrF3) await sendWhatsAppMessage(mgrF3, `HEURE SOUHAITÉE — Client : +${phone} — ${trimmed}`)
+    await sendWhatsAppMessage(phone, "Préférence d'horaire transmise. Notre équipe confirmera.")
+    return
+  }
+
+  // ── F5 — Occasion spéciale (anniversaire/fête) ────────────────────────────
+  if (/\b(anniversaire|f[eê]te|c[eé]l[eé]bration)\b/i.test(trimmed) &&
+      !/\b(traiteur|[eé]v[eé]nement|commande group[eé]e)\b/i.test(trimmed)) {
+    const mgrF5 = MANAGER_MAP[session.ville]
+    if (mgrF5) await sendWhatsAppMessage(mgrF5, `OCCASION SPÉCIALE — Client : +${phone} — ${trimmed}`)
+    await sendWhatsAppMessage(phone, "Bonne fête ! Nous ferons en sorte que votre commande soit parfaite.")
+    return
+  }
+
+  // ── G3 — Quelle agence ────────────────────────────────────────────────────
+  if (/\b(quelle agence|o[uù] je suis|dans quelle agence|mon agence)\b/i.test(trimmed)) {
+    await sendWhatsAppMessage(phone, `Vous êtes actuellement chez C Pizza ${session.ville}.`)
+    return
+  }
+
+  // ── H2 — Cuisson / extra fromage ─────────────────────────────────────────
+  if (/\b(bien cuite?|peu cuite?|extra fromage|fromage en plus)\b/i.test(trimmed)) {
+    const mgrH2 = MANAGER_MAP[session.ville]
+    if (mgrH2) await sendWhatsAppMessage(mgrH2, `PERSONNALISATION — Client : +${phone} — ${trimmed}`)
+    await sendWhatsAppMessage(phone, "Préférence transmise à notre équipe.")
+    return
+  }
+
+  // ── H3 — Blague / annuler en BROWSING ────────────────────────────────────
+  if (/\b(c'est une blague|c'[eé]tait pour rire|pour rire|annuler)\b/i.test(trimmed)) {
+    await updateSession(session.id, { state: STATE.BROWSING, order_summary: null })
+    await sendWhatsAppMessage(phone, "Pas de problème ! Revenez quand vous voulez.")
+    return
+  }
+
+  // ── H5 / H7 — Taille / pour combien de personnes ─────────────────────────
+  if (/\b(taille|dimension|combien de personnes|pour combien|quelle taille)\b/i.test(trimmed)) {
+    await sendWhatsAppMessage(phone, "M : idéale pour 1-2 personnes. XL : pour 2-3 personnes. XXL : pour 3-4 personnes.")
+    return
+  }
+
+  // ── J2 — Hors sujet total ─────────────────────────────────────────────────
+  if (/\b(m[eé]t[eé]o|sport|politique|actualit[eé]|football|temp[eé]rature)\b/i.test(trimmed)) {
+    await sendWhatsAppMessage(phone, "Je suis uniquement là pour vos commandes C Pizza. Comment puis-je vous aider ?")
+    return
+  }
+
+  // ── J3 — Robot / bot ──────────────────────────────────────────────────────
+  if (/\b(robot|bot|es-tu humain|es tu humain|vous [eê]tes un robot)\b/i.test(trimmed)) {
+    await sendWhatsAppMessage(phone, "Je suis l'assistant C Pizza, ici pour vous aider à commander rapidement !")
+    return
+  }
+
+  // ── J4 — Politesse / au revoir ────────────────────────────────────────────
+  if (/^(merci|bonne nuit|au revoir|bonne journ[eé]e|bonne soir[eé]e|[àa] bient[oô]t|bye)[.!,\s]*$/i.test(trimmed)) {
+    await sendWhatsAppMessage(phone, "Merci à vous ! À très bientôt chez C Pizza.")
+    return
+  }
+
   // Menu request → send images, no Claude
   if (RE_MENU_REQUEST.test(text)) {
     await sendMenuImages(phone)
@@ -348,15 +647,22 @@ async function handleBrowsing(phone, session, text, trimmed) {
       }
 
       await updateSession(session.id, {
-        state:         STATE.CHOOSING_DELIVERY_MODE,
+        state:         STATE.CONFIRMING_ORDER,
         order_summary: orderSummary,
       })
 
-      const confirmation = formatOrderConfirmation(extracted.items, extracted.total)
-      await sendWhatsAppMessage(phone, confirmation)
+      const confirmLines = extracted.items.map(i => {
+        const sizeStr = i.size ? ` ${i.size}` : ''
+        return `- ${i.qty}x ${i.name}${sizeStr} — ${i.price * i.qty} FCFA`
+      })
+      const confirmMsg = `Confirmez-vous votre commande ?\n${confirmLines.join('\n')}\nTotal : ${extracted.total} FCFA\n\n1. Oui, confirmer\n2. Non, modifier`
+      await sendWhatsAppMessage(phone, confirmMsg)
       return
     }
 
+    // FIX: detectOrderIntent returned true (e.g. via confirmation word like "oui") but
+    // no specific item could be extracted from the text. Never fall through to Claude here
+    // — it has no order context and will hallucinate. Ask the customer to name a dish.
     await sendWhatsAppMessage(phone,
       "Qu'aimeriez-vous commander ? Précisez le nom du plat (ex: Margherita XL) ou tapez « menu » pour voir notre carte.")
     return
@@ -379,6 +685,13 @@ async function handleBrowsing(phone, session, text, trimmed) {
 }
 
 async function handleChoosingDeliveryMode(phone, session, trimmed) {
+  // ── A3 — Ajouter un item (retour catalogue) ───────────────────────────────
+  if (/\b(ajouter|j'aimerais aussi|et aussi|je voudrais aussi|et en plus|rajouter)\b/i.test(trimmed)) {
+    await updateSession(session.id, { state: STATE.BROWSING })
+    await sendWhatsAppMessage(phone, "Bien sûr, que souhaitez-vous ajouter ?")
+    return
+  }
+
   const wantsDelivery = /^1$|livraison|domicile/i.test(trimmed)
   const wantsPickup   = /^2$|emporter|chercher|sur place/i.test(trimmed)
 
@@ -399,6 +712,22 @@ async function handleChoosingDeliveryMode(phone, session, trimmed) {
 async function handleWaitingAddress(phone, session, address) {
   const { ville, order_summary: order } = session
   const managerPhone = MANAGER_MAP[ville]
+
+  // ── B4 — Demande de changement d'adresse ─────────────────────────────────
+  if (/\b(changer adresse|modifier adresse|nouvelle adresse|changer mon adresse)\b/i.test(address)) {
+    if (managerPhone) {
+      await sendWhatsAppMessage(managerPhone, `CHANGEMENT ADRESSE — Client : +${phone} — Nouvelle demande d'adresse`)
+    }
+    await sendWhatsAppMessage(phone, "Quelle est votre nouvelle adresse de livraison ?")
+    return
+  }
+
+  // ── B1 — Adresse trop courte / non reconnaissable ─────────────────────────
+  const addrWords = address.replace(/[^a-zA-ZÀ-ÿ]/g, ' ').trim().split(/\s+/).filter(w => w.length >= 2)
+  if (address.length < 5 || addrWords.length === 0) {
+    await sendWhatsAppMessage(phone, "Pouvez-vous préciser votre adresse ? (quartier, rue, point de repère)")
+    return
+  }
 
   await updateSession(session.id, {
     state:            STATE.WAITING_DELIVERY_PRICE,
@@ -424,8 +753,8 @@ async function handlePickup(phone, session) {
   const managerPhone = MANAGER_MAP[ville]
 
   await updateSession(session.id, {
-    state:          STATE.WAITING_PAYMENT,
-    delivery_mode:  'pickup',
+    state:         STATE.WAITING_PAYMENT,
+    delivery_mode: 'pickup',
     delivery_price: 0,
   })
 
@@ -553,8 +882,8 @@ async function handleManagerMessage(managerPhone, branch, text) {
     }
 
     if (norm.startsWith('KB HORAIRE ')) {
-      const rest     = trimmed.slice('KB HORAIRE '.length).trim()
-      const spaceIdx = rest.indexOf(' ')
+      const rest       = trimmed.slice('KB HORAIRE '.length).trim()
+      const spaceIdx   = rest.indexOf(' ')
       if (spaceIdx === -1) {
         await sendWhatsAppMessage(managerPhone, 'Format : KB HORAIRE [agence] [horaire]')
         return
@@ -592,8 +921,8 @@ async function handleManagerMessage(managerPhone, branch, text) {
   }
 
   if (norm.startsWith('RUPTURE ')) {
-    const rest      = trimmed.slice('RUPTURE '.length).trim()
-    const lastSpace = rest.lastIndexOf(' ')
+    const rest       = trimmed.slice('RUPTURE '.length).trim()
+    const lastSpace  = rest.lastIndexOf(' ')
     if (lastSpace === -1) {
       await sendWhatsAppMessage(managerPhone, 'Format : RUPTURE [item] [numéro]')
       return
@@ -791,6 +1120,7 @@ function detectOrderIntent(text) {
     }
   }
 
+  // Confirmation words trigger if present (customer finalizing their pick)
   if (RE_CONFIRMATION.test(normalized)) return true
 
   return false
@@ -807,25 +1137,28 @@ function extractOrderFromText(text) {
       const idx    = normalized.indexOf(needle)
       if (idx === -1) continue
 
-      const end      = idx + needle.length
+      // Skip if this range overlaps a previously matched range
+      const end = idx + needle.length
       const overlaps = usedRanges.some(([s, e]) => idx < e && end > s)
       if (overlaps) continue
 
-      const before    = normalized.slice(Math.max(0, idx - 15), idx)
-      const after     = normalized.slice(end, end + 15)
-      let qty         = 1
+      // Extract quantity — look in a ±15-char window around the match
+      const before  = normalized.slice(Math.max(0, idx - 15), idx)
+      const after   = normalized.slice(end, end + 15)
+      let qty       = 1
       const qtyBefore = before.match(/(\d+)\s*x?\s*$/)
       const qtyAfter  = after.match(/^\s*x\s*(\d+)/)
       if (qtyBefore) qty = parseInt(qtyBefore[1])
       else if (qtyAfter) qty = parseInt(qtyAfter[1])
 
+      // Extract size for pizzas in a ±20-char window
       let size = null
       if (item.type === 'pizza') {
         const ctx = normalized.slice(Math.max(0, idx - 20), end + 20)
         if (/\bxxl\b/.test(ctx))      size = 'XXL'
         else if (/\bxl\b/.test(ctx))  size = 'XL'
         else if (/\bm\b/.test(ctx))   size = 'M'
-        else                           size = 'XL'
+        else                           size = 'XL' // default size
       }
 
       const price = item.type === 'pizza'
@@ -834,7 +1167,7 @@ function extractOrderFromText(text) {
 
       foundItems.push({ name: item.displayName, qty, size, price })
       usedRanges.push([idx, end])
-      break
+      break // matched this item, move to next MENU_ITEMS entry
     }
   }
 
@@ -890,6 +1223,7 @@ function describeState(session) {
     [STATE.BRANCH_CHANGE_PENDING]:        "Changement d'agence en cours.",
     [STATE.RESTORING_ORDER]:              'Confirmation de commande précédente.',
     [STATE.BROWSING]:                     `Navigation du menu — agence ${session.ville}.`,
+    [STATE.CONFIRMING_ORDER]:             'Confirmation de votre commande en attente.',
     [STATE.CHOOSING_DELIVERY_MODE]:       'Choix du mode de récupération.',
     [STATE.WAITING_ADDRESS]:              'En attente de votre adresse de livraison.',
     [STATE.WAITING_DELIVERY_PRICE]:       'En attente du prix de livraison (notre équipe calcule).',
