@@ -250,6 +250,11 @@ module.exports = async function handler(req, res) {
 async function handleCustomerMessage(phone, text) {
   const trimmed = text.trim()
 
+  if (trimmed.startsWith('COMMANDE_WEB|')) {
+    await handleWebOrder(phone, trimmed)
+    return
+  }
+
   if (RE_STATUS.test(trimmed)) {
     const session = await getActiveSession(phone)
     await sendWhatsAppMessage(phone, describeState(session))
@@ -805,6 +810,73 @@ async function handleBranchChange(phone, session) {
   await sendWhatsAppMessage(phone, `D'accord !\n\n${MSG.CHOOSE_BRANCH}`)
 }
 
+// ─── Web order handler (commande depuis commander.html) ───────────────────────
+
+async function handleWebOrder(phone, text) {
+  const parts = text.split('|')
+  // Format : COMMANDE_WEB|agence|items|mode|nom|tel
+  if (parts.length < 6) {
+    await createSession(phone, null)
+    await sendWhatsAppMessage(phone, MSG.CHOOSE_BRANCH)
+    return
+  }
+
+  const [, agence, itemsStr, , nom] = parts
+
+  if (!VALID_BRANCHES.includes(agence)) {
+    await createSession(phone, null)
+    await sendWhatsAppMessage(phone, MSG.CHOOSE_BRANCH)
+    return
+  }
+
+  const articles = parseWebOrderItems(itemsStr)
+  if (articles.length === 0) {
+    await sendWhatsAppMessage(phone, "Votre panier semble vide. Recomposez votre commande sur le site.")
+    return
+  }
+
+  const totalArticles = articles.reduce((s, a) => s + (a.prix || 0) * a.qty, 0)
+  const orderSummary = {
+    ville:          agence,
+    articles,
+    total_articles: totalArticles,
+    total_final:    totalArticles,
+  }
+
+  const existing = await getActiveSession(phone)
+  if (existing && PENDING_ORDER_STATES.has(existing.state)) {
+    await sendWhatsAppMessage(phone,
+      "Vous avez une commande en attente de paiement. Envoyez votre capture d'écran pour finaliser, ou tapez « annuler » pour repartir.")
+    return
+  }
+
+  if (existing) {
+    await updateSession(existing.id, {
+      state:            STATE.CHOOSING_DELIVERY_MODE,
+      ville:            agence,
+      order_summary:    orderSummary,
+      messages:         [],
+      delivery_mode:    null,
+      delivery_address: null,
+      delivery_price:   null,
+    })
+  } else {
+    const s = await createSession(phone, agence)
+    await updateSession(s.id, {
+      state:         STATE.CHOOSING_DELIVERY_MODE,
+      order_summary: orderSummary,
+    })
+  }
+
+  const itemLines = articles.map(a =>
+    `- ${a.qty}x ${a.nom}${a.taille ? ` (${a.taille})` : ''} — ${(a.prix || 0) * a.qty} FCFA`
+  ).join('\n')
+
+  const greeting = nom ? `Bonjour ${nom} ! ` : 'Bonjour ! '
+  await sendWhatsAppMessage(phone,
+    `${greeting}Votre commande C Pizza ${agence} :\n\n${itemLines}\nSous-total : ${totalArticles} FCFA\n\n${MSG.CHOOSE_DELIVERY_MODE}`)
+}
+
 // ─── Manager message handler ──────────────────────────────────────────────────
 
 async function handleManagerMessage(managerPhone, branch, text) {
@@ -1175,6 +1247,20 @@ function extractOrderFromText(text) {
 
   const total = foundItems.reduce((sum, i) => sum + i.price * i.qty, 0)
   return { items: foundItems, total }
+}
+
+function parseWebOrderItems(itemsStr) {
+  return itemsStr.split(',').map(raw => {
+    const m = raw.trim().match(/^(\d+)x\s+(.+)\s+(\d+)\s+FCFA$/i)
+    if (!m) return null
+    const qty  = parseInt(m[1])
+    const prix = parseInt(m[3])
+    const nameAndSize = m[2].trim()
+    const sizeM  = nameAndSize.match(/^(.+?)\s+(XXL|XL|M)$/i)
+    const nom    = sizeM ? sizeM[1] : nameAndSize
+    const taille = sizeM ? sizeM[2].toUpperCase() : null
+    return { nom, qty, prix, taille }
+  }).filter(Boolean)
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────
