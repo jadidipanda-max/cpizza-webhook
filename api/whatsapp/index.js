@@ -1101,7 +1101,7 @@ async function claudeMenuAnswer(ville, messages) {
   const resp = await anthropic.messages.create({
     model:      'claude-haiku-4-5-20251001',
     max_tokens: 300,
-    system:     `Tu réponds aux questions sur le menu C Pizza ${ville}. Voici le menu complet :\n\n${buildMenuText()}${kbSection}\n\nBase-toi uniquement sur ces informations — n'invente aucun plat ni aucun prix. Tu décris les pizzas et suggères des plats. Tu ne prends pas de commande dans tes réponses — le système le fait automatiquement quand le client mentionne un plat. N'utilise jamais d'astérisques. Maximum 3 lignes par réponse.`,
+    system:     `Tu es l'assistant de C Pizza. Voici le menu complet :\n\n${buildMenuText()}${kbSection}\n\nBase-toi uniquement sur ces informations — n'invente aucun plat ni aucun prix. Tu décris les pizzas et suggères des plats. Tu ne prends pas de commande dans tes réponses — le système le fait automatiquement quand le client mentionne un plat. N'utilise jamais d'astérisques. Ne mentionne jamais le nom d'une agence ou d'une ville (Yassa, Essos, Odza, Bonamoussadi) dans tes réponses. Le message de bienvenue est toujours : "Bienvenue chez C Pizza ! Comment puis-je vous aider ?" Maximum 3 lignes par réponse.`,
     messages,
   })
   return resp.content[0].text
@@ -1257,6 +1257,18 @@ async function getActiveSession(phone) {
   }
 
   if (TERMINAL_STATES.has(s.state)) return null
+
+  // After 24 h of inactivity on a non-payment session, force a fresh CHOOSING_BRANCH
+  const NON_CRITICAL_STATES = new Set([
+    STATE.CHOOSING_BRANCH,
+    STATE.BROWSING,
+    STATE.CHOOSING_DELIVERY_MODE,
+    STATE.CONFIRMING_ORDER,
+  ])
+  if (NON_CRITICAL_STATES.has(s.state)) {
+    const sessionAge = Date.now() - new Date(s.created_at).getTime()
+    if (sessionAge > 24 * 60 * 60 * 1000) return null
+  }
 
   return s
 }
