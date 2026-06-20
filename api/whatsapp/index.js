@@ -1393,6 +1393,17 @@ async function getActiveSession(phone) {
     if (sessionAge > 24 * 60 * 60 * 1000) return null
   }
 
+  // Mid-flow states with no activity for 30 min are treated as abandoned
+  const STALE_STATES = new Set([
+    STATE.CHOOSING_DELIVERY_MODE,
+    STATE.WAITING_ADDRESS,
+    STATE.WAITING_DELIVERY_PRICE,
+  ])
+  if (STALE_STATES.has(s.state)) {
+    const lastActivity = s.updated_at || s.created_at
+    if (Date.now() - new Date(lastActivity).getTime() > 30 * 60 * 1000) return null
+  }
+
   return s
 }
 
