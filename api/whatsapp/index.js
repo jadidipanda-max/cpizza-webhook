@@ -814,14 +814,16 @@ async function handleBranchChange(phone, session) {
 
 async function handleWebOrder(phone, text) {
   const parts = text.split('|')
-  // Format : COMMANDE_WEB|agence|items|mode|nom|tel
+  // Format : COMMANDE_WEB|agence|items|mode|nom|tel|adresse
   if (parts.length < 6) {
     await createSession(phone, null)
     await sendWhatsAppMessage(phone, MSG.CHOOSE_BRANCH)
     return
   }
 
-  const [, agence, itemsStr, , nom] = parts
+  const [, agence, itemsStr, modeRaw, nom, , rawAddr] = parts
+  const isDelivery = modeRaw.includes('livraison')
+  const adresse    = rawAddr ? rawAddr.trim() : ''
 
   if (!VALID_BRANCHES.includes(agence)) {
     await createSession(phone, null)
@@ -843,6 +845,8 @@ async function handleWebOrder(phone, text) {
     total_final:    totalArticles,
   }
 
+  const managerPhone = MANAGER_MAP[agence]
+
   const existing = await getActiveSession(phone)
   if (existing && PENDING_ORDER_STATES.has(existing.state)) {
     await sendWhatsAppMessage(phone,
@@ -850,31 +854,64 @@ async function handleWebOrder(phone, text) {
     return
   }
 
-  if (existing) {
-    await updateSession(existing.id, {
-      state:            STATE.CHOOSING_DELIVERY_MODE,
+  const clientLabel = nom ? `+${phone} (${nom})` : `+${phone}`
+
+  if (isDelivery) {
+    const sessionData = {
+      state:            STATE.WAITING_DELIVERY_PRICE,
       ville:            agence,
       order_summary:    orderSummary,
       messages:         [],
-      delivery_mode:    null,
-      delivery_address: null,
+      delivery_mode:    'delivery',
+      delivery_address: adresse || null,
       delivery_price:   null,
-    })
+    }
+    if (existing) {
+      await updateSession(existing.id, sessionData)
+    } else {
+      const s = await createSession(phone, agence)
+      await updateSession(s.id, sessionData)
+    }
+
+    if (managerPhone) {
+      const items = formatItemsForManager(articles)
+      await sendWhatsAppMessage(managerPhone,
+        `Nouvelle commande — ${agence}\n` +
+        `Client : ${clientLabel}\n` +
+        `Articles :\n${items}\n` +
+        `Sous-total : ${totalArticles} FCFA\n` +
+        `Adresse : ${adresse || 'non précisée'}\n\n` +
+        `Quel est le prix de livraison ? Répondez avec le montant total (articles + livraison).`)
+    }
+    await sendWhatsAppMessage(phone, 'Commande reçue ! Nous revenons avec le prix de livraison bientôt.')
+
   } else {
-    const s = await createSession(phone, agence)
-    await updateSession(s.id, {
-      state:         STATE.CHOOSING_DELIVERY_MODE,
-      order_summary: orderSummary,
-    })
+    const sessionData = {
+      state:          STATE.WAITING_PAYMENT,
+      ville:          agence,
+      order_summary:  orderSummary,
+      messages:       [],
+      delivery_mode:  'pickup',
+      delivery_price: 0,
+    }
+    if (existing) {
+      await updateSession(existing.id, sessionData)
+    } else {
+      const s = await createSession(phone, agence)
+      await updateSession(s.id, sessionData)
+    }
+
+    if (managerPhone) {
+      const items = formatItemsForManager(articles)
+      await sendWhatsAppMessage(managerPhone,
+        `Nouvelle commande — ${agence}\n` +
+        `Client : ${clientLabel}\n` +
+        `Articles :\n${items}\n` +
+        `Total : ${totalArticles} FCFA\n\n` +
+        `COMMANDE A EMPORTER\nConfirmée via le système`)
+    }
+    await sendWhatsAppMessage(phone, formatPaymentMessage(agence, orderSummary, 0, 'pickup'))
   }
-
-  const itemLines = articles.map(a =>
-    `- ${a.qty}x ${a.nom}${a.taille ? ` (${a.taille})` : ''} — ${(a.prix || 0) * a.qty} FCFA`
-  ).join('\n')
-
-  const greeting = nom ? `Bonjour ${nom} ! ` : 'Bonjour ! '
-  await sendWhatsAppMessage(phone,
-    `${greeting}Votre commande C Pizza ${agence} :\n\n${itemLines}\nSous-total : ${totalArticles} FCFA\n\n${MSG.CHOOSE_DELIVERY_MODE}`)
 }
 
 // ─── Manager message handler ──────────────────────────────────────────────────
