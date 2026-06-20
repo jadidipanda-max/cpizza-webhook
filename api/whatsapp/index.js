@@ -1210,7 +1210,7 @@ async function claudeMenuAnswer(ville, messages) {
   const resp = await anthropic.messages.create({
     model:      'claude-haiku-4-5-20251001',
     max_tokens: 300,
-    system:     `Tu es l'assistant de C Pizza. Voici le menu complet :\n\n${buildMenuText()}${kbSection}\n\nBase-toi uniquement sur ces informations — n'invente aucun plat ni aucun prix. Tu décris les pizzas et suggères des plats. Tu ne prends pas de commande dans tes réponses — le système le fait automatiquement quand le client mentionne un plat. N'utilise jamais d'astérisques. Ne mentionne jamais le nom d'une agence ou d'une ville (Yassa, Essos, Odza, Bonamoussadi) dans tes réponses. Le message de bienvenue est toujours : "Bienvenue chez C Pizza ! Comment puis-je vous aider ?" Maximum 3 lignes par réponse.`,
+    system:     `Tu es l'assistant de C Pizza. Voici le menu complet :\n\n${buildMenuText()}${kbSection}\n\nBase-toi uniquement sur ces informations — n'invente aucun plat ni aucun prix. Tu décris les pizzas et suggères des plats. Tu ne prends pas de commande dans tes réponses — le système le fait automatiquement quand le client mentionne un plat. N'utilise jamais d'astérisques. Ne mentionne jamais le nom d'une agence ou d'une ville (Yassa, Essos, Odza, Bonamoussadi) dans tes réponses. Le message de bienvenue est toujours : "Bienvenue chez C Pizza ! Comment puis-je vous aider ?" Tu écris toujours en français correct et soigné. Fais particulièrement attention aux accords de genre (ex: "Excellent choix" pas "Excellente choix", car "choix" est masculin) et aux accords de nombre. Relis mentalement chaque phrase avant de répondre pour éviter toute faute grammaticale ou d'accord. Maximum 3 lignes par réponse.`,
     messages,
   })
   return resp.content[0].text
